@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,7 +11,7 @@ import (
 )
 
 const jokeSelect = `
-SELECT j.id, j.text, j.triggers, j.cluster, c.id, c.name, c.color, c.description,
+SELECT j.id, j.text, to_json(j.triggers), j.cluster, c.id, c.name, c.color, c.description,
        j.user_id, u.username, u.avatar_url, u.bio, j.likes_count, j.favorites_count,
        j.created_at, j.pos_x, j.pos_y, j.pos_z, j.embedding, j.is_duplicate
 FROM jokes j
@@ -23,17 +24,16 @@ type rowScanner interface { Scan(dest ...any) error }
 func scanJoke(row rowScanner) (Joke, error) {
 	var joke Joke
 	var id, authorID, clusterID int64
-	var clusterSlug, username, avatarURL, bio string
-	var triggers []string
+	var clusterSlug, username, avatarURL, bio, triggersJSON string
 	var created time.Time
 	var embedding []byte
-	err := row.Scan(&id, &joke.Text, &triggers, &clusterSlug, &clusterID, &joke.Cluster.Name, &joke.Cluster.Color, &joke.Cluster.Description,
+	err := row.Scan(&id, &joke.Text, &triggersJSON, &clusterSlug, &clusterID, &joke.Cluster.Name, &joke.Cluster.Color, &joke.Cluster.Description,
 		&authorID, &username, &avatarURL, &bio, &joke.LikesCount, &joke.FavoritesCount,
 		&created, &joke.PosX, &joke.PosY, &joke.PosZ, &embedding, &joke.IsDuplicate)
 	if err != nil { return Joke{}, err }
+	if err := json.Unmarshal([]byte(triggersJSON), &joke.Triggers); err != nil { return Joke{}, fmt.Errorf("decode joke triggers: %w", err) }
 	joke.ID = strconv.FormatInt(id, 10)
 	joke.UserID = authorID
-	joke.Triggers = triggers
 	joke.Cluster.ID = clusterID
 	joke.Cluster.Slug = clusterSlug
 	joke.Author = Author{ID: strconv.FormatInt(authorID, 10), Username: username, AvatarURL: avatarURL, Bio: bio}
