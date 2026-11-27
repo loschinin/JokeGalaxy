@@ -8,7 +8,7 @@ import {
 } from 'lucide-react';
 const Galaxy = lazy(() => import('./Galaxy').then((module) => ({ default: module.Galaxy })));
 import { analyzeJoke, searchJokes, suggestJokes, submitJoke, toggleJokeAction } from './api';
-import { clusters, demoUser, jokes as starterJokes, popularTriggers, rankLocally } from './data';
+import { clusters, rankLocally } from './data';
 import type { Author, Joke, JokeSearchResponse, SearchMode, SortMode } from './types';
 
 const MODE_LABELS: Record<SearchMode, string> = {
@@ -104,8 +104,9 @@ function App() {
   const [page, setPage] = useState<'home' | 'standup' | 'favorites' | 'profile' | 'detail' | 'admin'>('home');
   const [profileId, setProfileId] = useState('me');
   const [detailId, setDetailId] = useState('');
-  const [allJokes, setAllJokes] = useState<Joke[]>(starterJokes);
-  const [selectedJoke, setSelectedJoke] = useState<Joke>(starterJokes[0]);
+  const [allJokes, setAllJokes] = useState<Joke[]>([]);
+  const [selectedJoke, setSelectedJoke] = useState<Joke | null>(null);
+  const [popularTriggers, setPopularTriggers] = useState<string[]>([]);
   const [hoveredJoke, setHoveredJoke] = useState<Joke | null>(null);
   const [visibleCount, setVisibleCount] = useState(8);
   const [serverPage, setServerPage] = useState(1);
@@ -131,11 +132,19 @@ function App() {
   const [currentUser, setCurrentUser] = useState<Author | null>(null);
   const [publicProfile, setPublicProfile] = useState<Author | null>(null);
   const [backendAvailable, setBackendAvailable] = useState(false);
-  const [credits, setCredits] = useState(() => Number(localStorage.getItem('jg-credits') || '50'));
+  const [credits, setCredits] = useState(0);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const showToast = useCallback((message: string) => setToastMessage(message), []);
+  const refreshPopularTriggers = useCallback(async () => {
+    try {
+      const response = await fetch('/api/triggers');
+      if (!response.ok) throw new Error('Не удалось получить теги.');
+      const payload = await response.json();
+      setPopularTriggers(Array.isArray(payload.triggers) ? payload.triggers.map((item: { tag?: string }) => item.tag).filter((tag: unknown): tag is string => typeof tag === 'string' && tag.length > 0) : []);
+    } catch { setPopularTriggers([]); }
+  }, []);
 
   const readLocation = useCallback(() => {
     const path = window.location.pathname;
@@ -161,6 +170,8 @@ function App() {
     readLocation();
     const handlePop = () => readLocation();
     window.addEventListener('popstate', handlePop);
+    localStorage.removeItem('jg-credits');
+    void refreshPopularTriggers();
     const seen = localStorage.getItem('jg-onboarding-complete');
     if (!seen) setShowOnboarding(true);
     const handleInstall = (event: Event) => { event.preventDefault(); setInstallPrompt(event); };
@@ -173,13 +184,13 @@ function App() {
     fetch(`/api/jokes?${initialParams}`)
       .then((response) => response.ok ? response.json() : null)
       .then((payload) => {
-        if (payload && Array.isArray(payload.jokes) && payload.jokes.length) {
+        if (payload && Array.isArray(payload.jokes)) {
           setAllJokes((current) => {
             const merged = new Map(current.map((item) => [item.id, item]));
             payload.jokes.forEach((item: Joke) => merged.set(item.id, item));
             return [...merged.values()];
           });
-          setSelectedJoke(payload.jokes[0]);
+          setSelectedJoke(payload.jokes[0] ?? null);
           setServerPage(payload.page ?? 1);
           setServerHasMore(Boolean(payload.has_more));
         }
@@ -193,14 +204,14 @@ function App() {
         const rawUser = payload.user;
         const account: Author = {
           id: String(rawUser.id),
-          username: rawUser.username || 'Автор Галактики',
+          username: rawUser.username || 'Пользователь',
           avatarUrl: rawUser.avatar_url || rawUser.avatarUrl,
           email: rawUser.email || '',
           bio: rawUser.bio || '',
           createdAt: rawUser.created_at,
         };
         setCurrentUser(account);
-        setCredits(Number.isFinite(Number(rawUser.standup_credits)) ? Number(rawUser.standup_credits) : 50);
+        setCredits(Number.isFinite(Number(rawUser.standup_credits)) ? Number(rawUser.standup_credits) : 0);
         if (rawUser.onboarding_completed) {
           localStorage.setItem('jg-onboarding-complete', 'true');
           setShowOnboarding(false);
@@ -211,13 +222,14 @@ function App() {
         }
       } else {
         setCurrentUser(null);
+        setCredits(0);
       }
-    }).catch(() => setBackendAvailable(false));
+    }).catch(() => { setBackendAvailable(false); setCurrentUser(null); setCredits(0); });
     return () => {
       window.removeEventListener('popstate', handlePop);
       window.removeEventListener('beforeinstallprompt', handleInstall);
     };
-  }, [readLocation]);
+  }, [readLocation, refreshPopularTriggers]);
 
   useEffect(() => {
     if (page !== 'profile') { setPublicProfile(null); return; }
@@ -234,7 +246,7 @@ function App() {
           const payload = await response.json();
           const rawUser = payload.user ?? payload;
           setPublicProfile({
-            id: String(rawUser.id), username: rawUser.username || 'Автор Галактики',
+            id: String(rawUser.id), username: rawUser.username || 'Пользователь',
             avatarUrl: rawUser.avatar_url || rawUser.avatarUrl, bio: rawUser.bio || '',
             createdAt: rawUser.created_at, jokesCount: Number(rawUser.jokes_count ?? 0), totalLikes: Number(rawUser.likes_count ?? 0),
           });
@@ -295,8 +307,6 @@ function App() {
     }).catch(() => undefined);
     return () => controller.abort();
   }, [page, backendAvailable, currentUser?.id]);
-
-  useEffect(() => { localStorage.setItem('jg-credits', String(credits)); }, [credits]);
 
   const loadMoreServer = useCallback(async () => {
     if (!serverHasMore || loadingMore) return;
@@ -369,7 +379,15 @@ function App() {
         result = { keyword_results: local.keyword, semantic_results: local.semantic, query: trimmed, mode };
       }
       setSearchResponse(result);
-      const first = result.keyword_results?.[0] ?? result.semantic_results?.[0];
+      const matches = [...(result.keyword_results ?? []), ...(result.semantic_results ?? [])];
+      if (matches.length) {
+        setAllJokes((current) => {
+          const merged = new Map(current.map((item) => [item.id, item]));
+          matches.forEach((item) => merged.set(item.id, item));
+          return [...merged.values()];
+        });
+      }
+      const first = matches[0];
       if (first) setSelectedJoke(first);
       if (!first) showToast('Пока не нашли совпадений. Попробуйте переформулировать запрос.');
     } finally { setIsSearching(false); }
@@ -384,7 +402,7 @@ function App() {
     let list = [...allJokes];
     if (clusterFilters.length) list = list.filter((joke) => clusterFilters.includes(joke.cluster.slug));
     if (activeTrigger) list = list.filter((joke) => joke.triggers.some((tag) => tag.toLocaleLowerCase('ru') === activeTrigger.toLocaleLowerCase('ru')));
-    if (onlyMine) list = list.filter((joke) => joke.author.id === (currentUser?.id ?? demoUser.id));
+    if (onlyMine) list = currentUser ? list.filter((joke) => joke.author.id === currentUser.id) : [];
     if (page === 'favorites') list = list.filter((joke) => joke.favorited);
     if (page === 'profile' && profileId !== 'me') list = list.filter((joke) => joke.author.id === profileId);
     switch (sortMode) {
@@ -460,22 +478,39 @@ function App() {
     setCurrentUser(null);
     setProfileId('me');
     navigate('/user/me');
-    setCredits(50);
+    setCredits(0);
     localStorage.removeItem('jg-credits');
     showToast('Вы вышли из аккаунта.');
   };
 
-  const currentProfile = useMemo<Author>(() => {
-    if (profileId === 'me' || currentUser?.id === profileId) return currentUser ?? demoUser;
+  const currentProfile = useMemo<Author | null>(() => {
+    if (profileId === 'me' || currentUser?.id === profileId) return currentUser;
     if (publicProfile?.id === profileId) return publicProfile;
-    return allJokes.find((joke) => joke.author.id === profileId)?.author ?? { id: profileId, username: 'Автор Галактики', bio: 'Публичный профиль автора в Галактике юмора.' };
+    return allJokes.find((joke) => joke.author.id === profileId)?.author ?? null;
   }, [profileId, allJokes, currentUser, publicProfile]);
-  const detailJoke = allJokes.find((joke) => joke.id === detailId) ?? selectedJoke;
+  const detailJoke = allJokes.find((joke) => joke.id === detailId) ?? null;
+  const detailJokeLoaded = detailJoke !== null;
+  useEffect(() => {
+    if (page !== 'detail' || !detailId || !backendAvailable || detailJokeLoaded) return;
+    const controller = new AbortController();
+    fetch(`/api/jokes/${encodeURIComponent(detailId)}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : null)
+      .then((joke: Joke | null) => {
+        if (!joke?.id) return;
+        setAllJokes((current) => current.some((item) => item.id === joke.id) ? current : [...current, joke]);
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [page, detailId, backendAvailable, detailJokeLoaded]);
+  useEffect(() => {
+    if (selectedJoke && !allJokes.some((joke) => joke.id === selectedJoke.id)) {
+      setSelectedJoke(allJokes[0] ?? null);
+    }
+  }, [allJokes, selectedJoke]);
   const similarJokes = detailJoke ? allJokes.filter((item) => item.id !== detailJoke.id)
     .map((item) => ({ item, score: item.triggers.filter((tag) => detailJoke.triggers.includes(tag)).length + (item.cluster.slug === detailJoke.cluster.slug ? 1 : 0) }))
     .sort((a, b) => b.score - a.score).slice(0, 3).map(({ item }) => item) : [];
 
-  const visibleAccount = currentUser ?? demoUser;
   const navItems = [
     { id: 'home', label: 'Галактика', icon: Home, path: '/' },
     { id: 'standup', label: 'Студия стендапа', icon: Sparkles, path: '/standup' },
@@ -510,9 +545,9 @@ function App() {
           <button className="sidebar-more" onClick={() => setShowClusterMenu((value) => !value)}>Все кластеры <ChevronDown size={13} /></button>
         </div>
         <div className="sidebar-bottom">
-          <div className="credit-mini"><span className="credit-icon"><Zap size={15} fill="currentColor" /></span><div><strong>{credits} генераций</strong><small>на вашем балансе</small></div><button onClick={() => setShowCreditsModal(true)} aria-label="Пополнить баланс"><Plus size={15} /></button></div>
+          {currentUser && <div className="credit-mini"><span className="credit-icon"><Zap size={15} fill="currentColor" /></span><div><strong>{credits} генераций</strong><small>на вашем балансе</small></div><button onClick={() => setShowCreditsModal(true)} aria-label="Пополнить баланс"><Plus size={15} /></button></div>}
           <button className="install-cta" onClick={handleInstall}><span className="install-star"><Sparkles size={14} /></span><span><b>С собой в телефоне</b><small>Установить приложение</small></span><ArrowUpRight size={15} /></button>
-          <button className="profile-mini" onClick={() => navigate('/user/me')}><Avatar user={visibleAccount} size="small" /><span><b>{visibleAccount.username}</b><small>{currentUser ? 'Ваш профиль' : 'Войти в профиль'}</small></span><ChevronRight size={14} /></button>
+          {currentUser ? <button className="profile-mini" onClick={() => navigate('/user/me')}><Avatar user={currentUser} size="small" /><span><b>{currentUser.username}</b><small>Ваш профиль</small></span><ChevronRight size={14} /></button> : <button className="profile-mini" onClick={() => backendAvailable ? window.location.assign('/auth/yandex/login') : showToast('Вход станет доступен после подключения сервера.')}><span className="avatar avatar-small account-action-icon"><UserRound size={15} /></span><span><b>{backendAvailable ? 'Войти через Яндекс' : 'Нет подключения к серверу'}</b><small>Профиль появится после входа</small></span><ChevronRight size={14} /></button>}
           <a className="admin-subtle-link" href="/admin" onClick={(event) => { event.preventDefault(); navigate('/admin'); }}><Shield size={13} /> Панель редакции</a>
         </div>
       </aside>
@@ -521,12 +556,12 @@ function App() {
         <header className="topbar">
           <button className="mobile-menu-button" onClick={() => setShowMobileMenu((value) => !value)} aria-label="Открыть меню">{showMobileMenu ? <X size={20} /> : <Menu size={20} />}</button>
           <div className="topbar-breadcrumb"><span>ГАЛАКТИКА ЮМОРА</span><ChevronRight size={13} /><span className="breadcrumb-current">{page === 'home' ? 'Обзор' : page === 'standup' ? 'Студия стендапа' : page === 'favorites' ? 'Избранное' : page === 'profile' ? 'Профиль автора' : page === 'detail' ? 'Шутка' : 'Администрирование'}</span></div>
-          <div className="topbar-actions"><button className="balance-pill" onClick={() => setShowCreditsModal(true)}><Zap size={14} fill="currentColor" />{credits}<span>генераций</span></button><button className="button button-primary button-top-add" onClick={() => setShowAddModal(true)}><Plus size={16} />Добавить шутку</button><button className="top-avatar" onClick={() => navigate('/user/me')} aria-label="Мой профиль"><Avatar user={visibleAccount} size="small" /></button></div>
+          <div className="topbar-actions">{currentUser && <button className="balance-pill" onClick={() => setShowCreditsModal(true)}><Zap size={14} fill="currentColor" />{credits}<span>генераций</span></button>}<button className="button button-primary button-top-add" onClick={() => setShowAddModal(true)}><Plus size={16} />Добавить шутку</button>{currentUser ? <button className="top-avatar" onClick={() => navigate('/user/me')} aria-label="Мой профиль"><Avatar user={currentUser} size="small" /></button> : <button className="button button-secondary button-login" disabled={!backendAvailable} onClick={() => window.location.assign('/auth/yandex/login')}>Войти</button>}</div>
         </header>
 
         <div className="content-wrap">
           {page === 'home' && <HomePage
-            allJokes={allJokes} filteredJokes={filteredJokes} visibleCount={visibleCount} setVisibleCount={setVisibleCount}
+            allJokes={allJokes} filteredJokes={filteredJokes} popularTriggers={popularTriggers} visibleCount={visibleCount} setVisibleCount={setVisibleCount}
             selectedJoke={selectedJoke} setSelectedJoke={setSelectedJoke} hoveredJoke={hoveredJoke} setHoveredJoke={setHoveredJoke}
             searchText={searchText} setSearchText={setSearchText} searchInputRef={searchInputRef} submittedQuery={submittedQuery}
             searchMode={searchMode} setSearchMode={(mode) => { setSearchMode(mode); if (submittedQuery) void runSearch(submittedQuery, mode); }}
@@ -541,8 +576,8 @@ function App() {
           />}
           {page === 'standup' && <StandupPage credits={credits} setCredits={setCredits} jokes={allJokes} showToast={showToast} backendAvailable={backendAvailable} authenticated={Boolean(currentUser)} onTopUp={() => setShowCreditsModal(true)} onVoice={(setter, current) => startVoice(setter, current)} />}
           {page === 'favorites' && <FavoritesPage jokes={filteredJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onExplore={() => navigate('/')} authRequired={backendAvailable && !currentUser} hasMore={serverHasMore} loadingMore={loadingMore} onLoadMore={loadMoreServer} />}
-          {page === 'profile' && <ProfilePage user={currentProfile} isOwner={profileId === 'me' || profileId === currentUser?.id} authenticated={Boolean(currentUser)} onLogout={signOut} jokes={filteredJokes} allJokes={allJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onAdd={() => setShowAddModal(true)} hasMore={serverHasMore} loadingMore={loadingMore} onLoadMore={loadMoreServer} />}
-          {page === 'detail' && detailJoke && <DetailPage joke={detailJoke} similar={similarJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onBack={() => navigate('/')} />}
+          {page === 'profile' && (currentProfile ? <ProfilePage user={currentProfile} isOwner={profileId === 'me' || profileId === currentUser?.id} authenticated={Boolean(currentUser)} onLogout={signOut} jokes={filteredJokes} allJokes={allJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onAdd={() => setShowAddModal(true)} hasMore={serverHasMore} loadingMore={loadingMore} onLoadMore={loadMoreServer} /> : <ProfileUnavailable profileId={profileId} backendAvailable={backendAvailable} />)}
+          {page === 'detail' && detailJoke ? <DetailPage joke={detailJoke} similar={similarJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onBack={() => navigate('/')} /> : page === 'detail' ? <section className="detail-page"><EmptyState title="Шутка не найдена" text="В коллекции пока нет этой публикации." button="Вернуться в галактику" onClick={() => navigate('/')} /></section> : null}
           {page === 'admin' && <AdminConsole jokes={allJokes} setJokes={setAllJokes} onlineMode={backendAvailable} showToast={showToast} />}
         </div>
         <footer className="app-footer"><span>© 2026 Галактика юмора</span><span>Собрано с <span className="footer-heart">♥</span> и самоиронией</span><button onClick={() => { setOnboardingStep(0); setShowOnboarding(true); }}>Как это работает?</button></footer>
@@ -551,17 +586,17 @@ function App() {
     </div>
 
     {showOnboarding && <OnboardingModal step={onboardingStep} setStep={setOnboardingStep} onClose={finishOnboarding} />}
-    {showAddModal && <AddJokeModal onClose={closeAddModal} onlineMode={backendAvailable} authRequired={backendAvailable && !currentUser} onSave={(joke) => {
-      setAllJokes((current) => [joke, ...current]); setSelectedJoke(joke); setVisibleCount((count) => count + 1); showToast('Шутка добавлена в Галактику. Спасибо!'); closeAddModal();
+    {showAddModal && <AddJokeModal onClose={closeAddModal} onlineMode={backendAvailable} authRequired={!backendAvailable || !currentUser} onSave={(joke) => {
+      setAllJokes((current) => [joke, ...current]); setSelectedJoke(joke); setVisibleCount((count) => count + 1); void refreshPopularTriggers(); showToast('Шутка добавлена в Галактику. Спасибо!'); closeAddModal();
     }} onToast={showToast} />}
-    {showCreditsModal && <CreditsModal onClose={() => setShowCreditsModal(false)} credits={credits} setCredits={setCredits} allowDemoTopUp={!backendAvailable} authenticated={Boolean(currentUser)} email={currentUser?.email ?? ''} onToast={showToast} />}
+    {showCreditsModal && <CreditsModal onClose={() => setShowCreditsModal(false)} credits={credits} backendAvailable={backendAvailable} authenticated={Boolean(currentUser)} email={currentUser?.email ?? ''} onToast={showToast} />}
     {toastMessage && <Toast message={toastMessage} onClose={() => setToastMessage('')} />}
   </View>;
 }
 
 function HomePage(props: {
-  allJokes: Joke[]; filteredJokes: Joke[]; visibleCount: number; setVisibleCount: React.Dispatch<React.SetStateAction<number>>;
-  selectedJoke: Joke; setSelectedJoke: (joke: Joke) => void; hoveredJoke: Joke | null; setHoveredJoke: (joke: Joke | null) => void;
+  allJokes: Joke[]; filteredJokes: Joke[]; popularTriggers: string[]; visibleCount: number; setVisibleCount: React.Dispatch<React.SetStateAction<number>>;
+  selectedJoke: Joke | null; setSelectedJoke: (joke: Joke | null) => void; hoveredJoke: Joke | null; setHoveredJoke: (joke: Joke | null) => void;
   searchText: string; setSearchText: (value: string) => void; searchInputRef: React.RefObject<HTMLInputElement>; submittedQuery: string;
   searchMode: SearchMode; setSearchMode: (mode: SearchMode) => void; searchResponse: JokeSearchResponse | null; allSearchResultIds: Set<string>;
   isSearching: boolean; runSearch: (query?: string, mode?: SearchMode) => Promise<void>; activeTrigger: string; clusterFilters: string[];
@@ -573,7 +608,7 @@ function HomePage(props: {
   onClear: () => void;
 }) {
   const {
-    allJokes, filteredJokes, visibleCount, setVisibleCount, selectedJoke, setSelectedJoke, hoveredJoke, setHoveredJoke,
+    allJokes, filteredJokes, popularTriggers, visibleCount, setVisibleCount, selectedJoke, setSelectedJoke, hoveredJoke, setHoveredJoke,
     searchText, setSearchText, searchInputRef, submittedQuery, searchMode, setSearchMode, searchResponse, allSearchResultIds,
     isSearching, runSearch, activeTrigger, clusterFilters, setClusterFilters, sortMode, setSortMode, onlyMine, setOnlyMine,
     showClusterMenu, setShowClusterMenu, sentinelRef, serverHasMore, loadingMore, onLoadMore,
@@ -592,7 +627,7 @@ function HomePage(props: {
   return <>
     <section className="page-intro home-intro">
       <div className="eyebrow"><span className="eyebrow-line" /> ИНТЕРАКТИВНАЯ КОЛЛЕКЦИЯ <span className="eyebrow-spark">✦</span></div>
-      <div className="home-title-row"><div><h1>Найдите свою <span>шутку.</span></h1><p>Ищите не только по словам — ищите по ощущению.</p></div><button className="daily-note" onClick={() => { if (allJokes[5]) setSelectedJoke(allJokes[5]); }}><span className="daily-note-icon"><Sparkles size={16} /></span><span><b>Есть минутка?</b><small>Карта дня уже ждёт</small></span><ArrowUpRight size={15} /></button></div>
+      <div className="home-title-row"><div><h1>Найдите свою <span>шутку.</span></h1><p>Ищите не только по словам — ищите по ощущению.</p></div><button className="daily-note" onClick={() => allJokes.length ? setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)]) : onAdd()}><span className="daily-note-icon"><Sparkles size={16} /></span><span><b>{allJokes.length ? 'Есть минутка?' : 'Коллекция пуста'}</b><small>{allJokes.length ? 'Выбрать случайную шутку' : 'Опубликовать первую'}</small></span><ArrowUpRight size={15} /></button></div>
     </section>
 
     <section className="search-section" aria-label="Поиск шуток">
@@ -616,14 +651,14 @@ function HomePage(props: {
     {submittedQuery && <section className="search-results-section" aria-live="polite">
       <div className="results-heading"><div><span className="section-kicker">РЕЗУЛЬТАТЫ ПОИСКА</span><h2>Для запроса <span className="query-highlight">«{submittedQuery}»</span></h2></div><button className="clear-results" onClick={onClear}><X size={14} /> Очистить поиск</button></div>
       <div className="results-meta"><span className="result-mode-pill"><Sparkles size={12} />{MODE_LABELS[searchMode]}</span><span>{(keywordResults.length + semanticResults.length).toLocaleString('ru-RU')} совпадений</span><span className="result-live-dot" />{isSearching ? 'Ищем в галактике…' : 'Релевантность учтена'}</div>
-      {!keywordResults.length && !semanticResults.length && !isSearching && <div className="no-results-note"><Info size={15} /> Точных совпадений пока нет. Ниже — идеи из близких тем.</div>}
+      {!keywordResults.length && !semanticResults.length && !isSearching && <div className="no-results-note"><Info size={15} />{allJokes.length ? 'Точных совпадений пока нет. Попробуйте изменить запрос.' : 'Коллекция пока пуста — добавьте первую шутку.'}</div>}
       {keywordResults.length > 0 && <div className="result-group"><div className="result-group-title"><span className="result-index">01</span><div><h3>Совпадения по словам</h3><p>Текст шутки и смысловые триггеры</p></div><span className="result-count">{keywordResults.length}</span></div><div className="result-card-grid">{keywordResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge">{Math.round((joke.relevance ?? 0.82) * 100)}% в тему</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {searchMode === 'hybrid' && <div className="semantic-divider"><span /><div><Compass size={14} /> Похожие по смыслу</div><span /></div>}
       {semanticResults.length > 0 && <div className="result-group semantic-group"><div className="result-group-title"><span className="result-index semantic-index">{searchMode === 'semantic' ? '01' : '02'}</span><div><h3>{searchMode === 'semantic' ? 'По смыслу и ситуации' : 'Похожие по смыслу'}</h3><p>Нашли даже без общих слов</p></div><span className="result-count">{semanticResults.length}</span></div><div className="result-card-grid">{semanticResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge semantic-relevance">{Math.round((joke.relevance ?? 0.76) * 100)}% близко</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {isSearching && <div className="search-loading"><LoaderCircle size={16} className="spin" /> Подбираем смысловые совпадения…</div>}
     </section>}
 
-    <div className="popular-row"><div className="popular-label"><Tags size={14} /><span>ПОПУЛЯРНОЕ</span></div><div className="popular-tags">{popularTriggers.map((tag, index) => <button key={tag} className={`popular-tag ${activeTrigger === tag ? 'popular-tag-active' : ''}`} onClick={() => onTag(tag)}><span className={`popular-dot pop-dot-${index % 4}`} />{tag}</button>)}</div><button className="all-tags-link" onClick={() => setShowClusterMenu((value) => !value)}>Фильтры <ChevronDown size={13} /></button></div>
+    {popularTriggers.length > 0 && <div className="popular-row"><div className="popular-label"><Tags size={14} /><span>ПОПУЛЯРНОЕ</span></div><div className="popular-tags">{popularTriggers.map((tag, index) => <button key={tag} className={`popular-tag ${activeTrigger === tag ? 'popular-tag-active' : ''}`} onClick={() => onTag(tag)}><span className={`popular-dot pop-dot-${index % 4}`} />{tag}</button>)}</div><button className="all-tags-link" onClick={() => setShowClusterMenu((value) => !value)}>Фильтры <ChevronDown size={13} /></button></div>}
 
     <div className="filter-panel">
       <div className="filter-left">
@@ -640,7 +675,7 @@ function HomePage(props: {
 
     <section className="explore-grid">
       <div className="panel galaxy-panel">
-        <div className="panel-heading galaxy-heading"><div><div className="panel-title-line"><span className="orbit-mark"><span /></span><h2>Карта юмора</h2><span className="live-pill"><span /> В эфире</span></div><p>Каждая точка — шутка. Рядом те, что говорят на похожем языке.</p></div><button className="icon-button muted-icon-button" onClick={() => setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)] ?? selectedJoke)} aria-label="Случайная шутка"><Sparkles size={16} /></button></div>
+        <div className="panel-heading galaxy-heading"><div><div className="panel-title-line"><span className="orbit-mark"><span /></span><h2>Карта юмора</h2><span className="live-pill"><span />{allJokes.length ? 'В эфире' : 'Пока пусто'}</span></div><p>Каждая точка — шутка. Рядом те, что говорят на похожем языке.</p></div><button className="icon-button muted-icon-button" onClick={() => { if (allJokes.length) setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)]); }} disabled={!allJokes.length} aria-label="Случайная шутка"><Sparkles size={16} /></button></div>
         <div className="galaxy-stage"><Suspense fallback={<div className="galaxy-loading">Загружаем трёхмерную карту…</div>}><Galaxy jokes={galaxyJokes} selectedId={selectedJoke?.id} highlightedIds={allSearchResultIds} onSelect={setSelectedJoke} onHover={setHoveredJoke} /></Suspense>
           {hoveredJoke && <div className="galaxy-hover-card"><span className="cluster-dot" style={{ background: hoveredJoke.cluster.color }} /><span>{hoveredJoke.text.replace(/\n/g, ' ').slice(0, 88)}{hoveredJoke.text.length > 88 ? '…' : ''}</span><ArrowUpRight size={14} /></div>}
           <div className="galaxy-stat"><span className="galaxy-stat-number">{galaxyJokes.length.toLocaleString('ru-RU')}</span><span>точек в поле зрения</span></div>
@@ -648,8 +683,8 @@ function HomePage(props: {
         <div className="galaxy-legend"><div className="legend-label">ТЕМЫ</div><div className="legend-items">{clusters.slice(0, 6).map((cluster) => <button key={cluster.slug} className={`legend-item ${clusterFilters.includes(cluster.slug) ? 'legend-item-muted' : ''}`} onClick={() => setClusterFilters((current) => current.includes(cluster.slug) ? current.filter((slug) => slug !== cluster.slug) : [...current, cluster.slug])}><span style={{ background: cluster.color }} />{cluster.name.split(/[, ]/)[0]}</button>)}</div><span className="legend-hint">нажмите, чтобы отфильтровать</span></div>
         {searchResponse && <div className="map-search-note"><span className="map-search-pulse" />{allSearchResultIds.size} шуток подсвечены по запросу «{submittedQuery}»</div>}
       </div>
-      <aside className="panel featured-panel">
-        <div className="featured-header"><div><span className="section-kicker">НА ЭТОЙ ОРБИТЕ</span><span className="featured-counter">№ {String((Number(selectedJoke?.id) || 1)).padStart(2, '0')}</span></div><button onClick={() => onShare(selectedJoke.id)} aria-label="Поделиться"><Share2 size={15} /></button></div>
+      {selectedJoke ? <aside className="panel featured-panel">
+        <div className="featured-header"><div><span className="section-kicker">НА ЭТОЙ ОРБИТЕ</span><span className="featured-counter">№ {String(Number(selectedJoke.id) || 1).padStart(2, '0')}</span></div><button onClick={() => onShare(selectedJoke.id)} aria-label="Поделиться"><Share2 size={15} /></button></div>
         <div className="featured-quote-mark">“</div>
         <button className="featured-text" onClick={() => onOpen(selectedJoke.id)}>{selectedJoke.text}</button>
         <div className="featured-cluster"><span style={{ background: selectedJoke.cluster.color }} />{selectedJoke.cluster.name}</div>
@@ -657,12 +692,12 @@ function HomePage(props: {
         <div className="featured-author"><button className="author-line" onClick={() => onProfile(selectedJoke.author.id)}><Avatar user={selectedJoke.author} size="normal" /><span><b>{selectedJoke.author.username}</b><small>Автор шутки</small></span></button><button className="text-link" onClick={() => onOpen(selectedJoke.id)}>Профиль шутки <ArrowUpRight size={13} /></button></div>
         <div className="featured-actions"><button className={`button button-secondary ${selectedJoke.liked ? 'button-liked' : ''}`} onClick={() => onLike(selectedJoke.id)}><Heart size={15} fill={selectedJoke.liked ? 'currentColor' : 'none'} />{selectedJoke.likesCount} нравится</button><button className={`icon-button ${selectedJoke.favorited ? 'favorite-on' : ''}`} onClick={() => onFavorite(selectedJoke.id)} aria-label="В избранное"><Bookmark size={16} fill={selectedJoke.favorited ? 'currentColor' : 'none'} /></button></div>
         <div className="featured-footnote"><span className="featured-footnote-dot" />Нажмите на точку в карте, чтобы открыть другую шутку</div>
-      </aside>
+      </aside> : <aside className="panel featured-panel featured-empty"><EmptyState title="Пока нет публикаций" text="Первая шутка появится здесь после публикации." button="Добавить шутку" onClick={onAdd} /></aside>}
     </section>
 
     <section className="feed-section">
       <div className="feed-heading"><div><span className="section-kicker">ИЗ ВСЕХ ОРБИТ</span><h2>{activeTrigger ? `Шутки по тегу «${activeTrigger}»` : clusterFilters.length ? 'Выбранные темы' : 'Свежие шутки'} <span className="feed-count">{filteredJokes.length}</span></h2></div><button className="button button-ghost" onClick={onAdd}><Plus size={15} />Поделиться своей</button></div>
-      {!displayJokes.length ? <EmptyState title="На этой орбите пока тихо" text="Снимите часть фильтров или добавьте первую шутку в тему." button="Сбросить фильтры" onClick={onClear} /> : <div className="feed-grid">{displayJokes.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div>}
+      {!displayJokes.length ? allJokes.length === 0 ? <EmptyState title="Галактика ждёт первой шутки" text="Пока здесь нет пользовательских публикаций. Добавьте первую, чтобы начать собирать коллекцию." button="Добавить первую шутку" onClick={onAdd} /> : <EmptyState title="На этой орбите пока тихо" text="Снимите часть фильтров или добавьте первую шутку в тему." button="Сбросить фильтры" onClick={onClear} /> : <div className="feed-grid">{displayJokes.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div>}
       {visibleCount < filteredJokes.length && <div ref={sentinelRef} className="feed-sentinel"><span className="loading-orbit" /><span>Подтягиваем шутки из другой орбиты…</span><button onClick={() => setVisibleCount((count) => Math.min(count + 8, filteredJokes.length))}>Показать ещё</button></div>}
       {visibleCount >= filteredJokes.length && serverHasMore && <div ref={sentinelRef} className="feed-sentinel"><span className="loading-orbit" /><span>{loadingMore ? 'Загружаем следующую партию…' : 'Здесь есть ещё шутки, подгружаем.'}</span><button onClick={() => void onLoadMore()}>Загрузить ещё</button></div>}
       {visibleCount >= filteredJokes.length && !serverHasMore && filteredJokes.length > 8 && <div className="feed-end"><span>✦</span> Вы на краю этой орбиты. Пока что.</div>}
@@ -690,7 +725,8 @@ function StandupPage({ credits, setCredits, jokes, showToast, backendAvailable, 
   const storyRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSuggest = async () => {
-    if (backendAvailable && !authenticated) { showToast('Войдите через Яндекс ID, чтобы подобрать шутки к своей истории.'); return; }
+    if (!backendAvailable) { showToast('Подбор шуток доступен после подключения сервера.'); return; }
+    if (!authenticated) { showToast('Войдите через Яндекс ID, чтобы подобрать шутки к своей истории.'); return; }
     if (story.trim().length < 12) { showToast('Добавьте чуть больше деталей — так подберём шутки точнее.'); storyRef.current?.focus(); return; }
     setIsSuggesting(true);
     try {
@@ -698,28 +734,10 @@ function StandupPage({ credits, setCredits, jokes, showToast, backendAvailable, 
       setThemes(response.themes ?? []);
       setCandidates(response.jokes ?? []);
       setSelectedIds((response.jokes ?? []).slice(0, 3).map((joke) => joke.id));
-    } catch {
-      const ranked = rankLocally(story, jokes, 'hybrid');
-      const matched = [...ranked.keyword, ...ranked.semantic].slice(0, 5);
-      const inferredThemes = [...new Set(matched.flatMap((joke) => joke.triggers))].slice(0, 3);
-      setThemes(inferredThemes.length ? inferredThemes : ['самоирония', 'неожиданность', 'повседневность']);
-      setCandidates(matched.length ? matched : jokes.slice(0, 4));
-      setSelectedIds((matched.length ? matched : jokes.slice(0, 4)).slice(0, 3).map((joke) => joke.id));
+      if (!response.jokes?.length) showToast('В коллекции пока нет подходящих публикаций. Добавьте первую шутку.');
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : 'Не удалось подобрать шутки.');
     } finally { setIsSuggesting(false); }
-  };
-
-  const buildDraft = () => {
-    const selected = candidates.filter((joke) => selectedIds.includes(joke.id));
-    const selectedText = selected.map((joke) => `\n${joke.text}`).join('\n');
-    const styleLead: Record<string, string> = {
-      custom: 'Я заметил, что самые смешные истории обычно начинаются с фразы «да это на пять минут».',
-      carlin: 'Меня всегда поражало, как много правил мы соблюдаем, не задавая ни одного вопроса.',
-      zhvanetsky: 'Событие было небольшое. Просто после него пришлось пересмотреть всё расписание.',
-      carter: 'Я долго делал вид, что меня это не задевает. А потом понял: задевает. И ещё как.',
-    };
-    const middle = story.trim().split(/[.!?\n]+/).filter(Boolean).slice(0, 2).join('. ');
-    const themesLine = themes.length ? `Если коротко, главные темы — ${themes.slice(0, 3).join(', ')}.` : '';
-    return `${styleLead[style] ?? styleLead.custom}\n\n${middle ? `Недавно у меня случилась история: ${middle}.` : 'Однажды у меня случилась история, которую я сначала назвал «небольшим недоразумением».'}\n${themesLine}\n\n${selectedText ? `Я попробовал посмотреть на это с другой стороны:${selectedText}` : 'И тут я понял: иногда лучшее решение — признать, что план был частью проблемы.'}\n\nВ общем, теперь я точно знаю: если жизнь предлагает вам неожиданный поворот, сначала проверьте, не навигатор ли это. Спасибо!`;
   };
 
   const syncCredits = async () => {
@@ -733,7 +751,8 @@ function StandupPage({ credits, setCredits, jokes, showToast, backendAvailable, 
   };
 
   const handleGenerate = async () => {
-    if (backendAvailable && !authenticated) { showToast('Войдите через Яндекс ID, чтобы сохранить монолог и списать генерацию.'); return; }
+    if (!backendAvailable) { showToast('Генерация доступна после подключения сервера.'); return; }
+    if (!authenticated) { showToast('Войдите через Яндекс ID, чтобы сохранить монолог и списать генерацию.'); return; }
     if (credits < 1) { onTopUp(); return; }
     if (story.trim().length < 12) { showToast('Сначала расскажите свою историю.'); storyRef.current?.focus(); return; }
     setCredits((value) => value - 1);
@@ -744,7 +763,7 @@ function StandupPage({ credits, setCredits, jokes, showToast, backendAvailable, 
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ story, style, joke_ids: selectedIds }),
       });
-      if (!response.ok && backendAvailable) {
+      if (!response.ok) {
         const payload = await response.json().catch(() => null);
         setIsGenerating(false);
         if (response.status === 402) {
@@ -757,60 +776,46 @@ function StandupPage({ credits, setCredits, jokes, showToast, backendAvailable, 
         }
         return;
       }
-      if (response.ok && response.body) {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          const events = buffer.split('\n\n');
-          buffer = events.pop() ?? '';
-          for (const event of events) {
-            const data = event.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
-            if (!data || data === '[DONE]') continue;
-            try {
-              const payload = JSON.parse(data);
-              const chunk = payload.text ?? payload.delta ?? '';
-              if (chunk) { received += chunk; setGenerated((text) => text + chunk); }
-            } catch { received += data; setGenerated((text) => text + data); }
-          }
+      if (!response.body) throw new Error('Сервер не вернул поток генерации.');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const events = buffer.split('\n\n');
+        buffer = events.pop() ?? '';
+        for (const event of events) {
+          const data = event.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
+          if (!data || data === '[DONE]') continue;
+          try {
+            const payload = JSON.parse(data);
+            const chunk = payload.text ?? payload.delta ?? '';
+            if (chunk) { received += chunk; setGenerated((text) => text + chunk); }
+          } catch { received += data; setGenerated((text) => text + data); }
         }
       }
     } catch (error) {
-      if (backendAvailable) {
-        setIsGenerating(false);
-        await syncCredits();
-        if (received) {
-          setHasGenerated(true);
-          showToast('Поток прервался. Сохранённая часть монолога осталась на экране.');
-        } else {
-          showToast(error instanceof Error ? error.message : 'Не удалось связаться с сервером генерации.');
-        }
-        return;
+      setIsGenerating(false);
+      await syncCredits();
+      if (received) {
+        setHasGenerated(true);
+        showToast('Поток прервался. Сохранённая часть монолога осталась на экране.');
+      } else {
+        showToast(error instanceof Error ? error.message : 'Не удалось связаться с сервером генерации.');
       }
+      return;
     }
-    if (!received && backendAvailable) {
+    if (!received) {
       setIsGenerating(false);
       await syncCredits();
       showToast('Сервер не вернул текст монолога. Баланс обновлён.');
       return;
     }
-    if (!received) {
-      const draft = buildDraft();
-      const words = draft.match(/\S+\s*/g) ?? [draft];
-      for (let index = 0; index < words.length; index += 1) {
-        const chunk = words.slice(index, index + 3).join('');
-        received += chunk;
-        setGenerated((text) => text + chunk);
-        await new Promise((resolve) => window.setTimeout(resolve, 30));
-        index += 2;
-      }
-    }
-    if (backendAvailable) await syncCredits();
-    setIsGenerating(false); setHasGenerated(Boolean(received));
-    if (received) showToast('Монолог готов. Хорошего выступления!');
+    await syncCredits();
+    setIsGenerating(false); setHasGenerated(true);
+    showToast('Монолог готов. Хорошего выступления!');
   };
 
   const toggleCandidate = (id: string) => setSelectedIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
@@ -855,6 +860,11 @@ function FavoritesPage({ jokes, onLike, onFavorite, onTag, onProfile, onOpen, on
   return <section className="collection-page"><div className="page-intro collection-intro"><div className="eyebrow"><span className="eyebrow-line" /> ВАША ЛИЧНАЯ ПОДБОРКА</div><div className="collection-title-row"><div><h1>Избранное<span className="title-star">✦</span></h1><p>Шутки, к которым хочется вернуться.</p></div><div className="collection-count"><Bookmark size={18} /><b>{jokes.length}</b><span>сохранено</span></div></div></div>{jokes.length ? <div className="feed-grid">{jokes.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div> : authRequired ? <div className="empty-state"><span className="empty-icon"><LockKeyhole size={20} /></span><h3>Войдите, чтобы увидеть избранное</h3><p>Сохранённые шутки привязаны к вашему аккаунту.</p><a className="button button-secondary button-small" href="/auth/yandex/login">Войти через Яндекс <ArrowRight size={14} /></a></div> : <EmptyState title="Здесь будет ваше смешное" text="Нажмите на закладку у понравившейся шутки — и она сохранится в этой подборке." button="Исследовать галактику" onClick={onExplore} />}{hasMore && <div className="feed-sentinel"><span>{loadingMore ? 'Загружаем сохранённые шутки…' : 'В коллекции есть ещё шутки.'}</span><button disabled={loadingMore} onClick={() => void onLoadMore()}>{loadingMore ? 'Загружаем…' : 'Показать ещё'}</button></div>}</section>;
 }
 
+function ProfileUnavailable({ profileId, backendAvailable }: { profileId: string; backendAvailable: boolean }) {
+  const isOwnProfile = profileId === 'me';
+  return <section className="profile-page"><div className="empty-state"><span className="empty-icon">{isOwnProfile ? <LockKeyhole size={20} /> : <UserRound size={20} />}</span><h3>{isOwnProfile ? backendAvailable ? 'Войдите, чтобы открыть профиль' : 'Профиль временно недоступен' : 'Профиль не найден'}</h3><p>{isOwnProfile ? backendAvailable ? 'После входа здесь появятся ваши публикации и сохранённые шутки.' : 'Подключите сервер, чтобы загрузить профиль.' : 'Публичный профиль появится здесь после первой публикации автора.'}</p>{isOwnProfile && backendAvailable && <a className="button button-secondary button-small" href="/auth/yandex/login">Войти через Яндекс <ArrowRight size={14} /></a>}</div></section>;
+}
+
 function ProfilePage({ user, isOwner, authenticated, onLogout, jokes, allJokes, onLike, onFavorite, onTag, onProfile, onOpen, onShare, onAdd, hasMore, loadingMore, onLoadMore }: {
   user: Author; isOwner: boolean; authenticated: boolean; onLogout: () => void; jokes: Joke[]; allJokes: Joke[]; onLike: (id: string) => void; onFavorite: (id: string) => void;
   onTag: (tag: string) => void; onProfile: (id: string) => void; onOpen: (id: string) => void; onShare: (id: string) => void; onAdd: () => void;
@@ -865,12 +875,12 @@ function ProfilePage({ user, isOwner, authenticated, onLogout, jokes, allJokes, 
   const visible = tab === 'favorites' && isOwner ? allJokes.filter((joke) => joke.favorited) : profileJokes;
   const likes = user.totalLikes ?? profileJokes.reduce((sum, joke) => sum + joke.likesCount, 0);
   const jokeCount = user.jokesCount ?? profileJokes.length;
-  const joined = user.createdAt ? `В Галактике с ${['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'][new Date(user.createdAt).getMonth()]} ${new Date(user.createdAt).getFullYear()}` : 'В Галактике с ноября 2026';
+  const joined = user.createdAt ? `В Галактике с ${['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'][new Date(user.createdAt).getMonth()]} ${new Date(user.createdAt).getFullYear()}` : 'Дата регистрации не указана';
   const shareProfile = async () => {
     try { await navigator.clipboard.writeText(`${window.location.origin}/user/${encodeURIComponent(user.id)}`); }
     catch { /* sharing from Web Share API below */ }
   };
-  return <section className="profile-page"><div className="profile-cover"><span className="cover-orbit cover-orbit-a" /><span className="cover-orbit cover-orbit-b" /><span className="cover-glow" /><span className="cover-star cover-star-a">✦</span><span className="cover-star cover-star-b">✧</span><span className="cover-label">АВТОРСКАЯ ОРБИТА</span></div><div className="profile-identity"><div className="profile-avatar-wrap"><Avatar user={user} size="large" /></div><div className="profile-heading-copy"><div className="profile-name-row"><h1>{user.username}</h1>{isOwner && <span className="profile-owner-pill"><UserRound size={12} />Это вы</span>}</div><p>{user.bio || 'Автор шуток и исследователь хорошего настроения.'}</p><span className="profile-joined"><Clock3 size={13} />{joined}</span></div><div className="profile-actions"><button className="button button-secondary" onClick={() => { void shareProfile(); if (navigator.share) navigator.share({ title: `Профиль ${user.username}`, url: `${window.location.origin}/user/${user.id}` }).catch(() => undefined); }}><Share2 size={15} />Поделиться профилем</button>{isOwner && <>{authenticated ? <button type="button" className="profile-login-link" onClick={() => void onLogout()}>Выйти из аккаунта <ArrowUpRight size={12} /></button> : <a className="profile-login-link" href="/auth/yandex/login">Войти через Яндекс <ArrowUpRight size={12} /></a>}<button className="button button-primary" onClick={onAdd}><Plus size={15} />Новая шутка</button></>}</div></div><div className="profile-stats"><div><b>{jokeCount}</b><span>шуток</span></div><div><b>{likes.toLocaleString('ru-RU')}</b><span>лайков</span></div><div><b>{profileJokes.reduce((sum, joke) => sum + joke.favoritesCount, 0)}</b><span>сохранений</span></div></div><div className="profile-tabs"><button className={tab === 'posts' ? 'profile-tab-active' : ''} onClick={() => setTab('posts')}><FileText size={15} />Публикации <span>{jokeCount}</span></button>{isOwner && <button className={tab === 'favorites' ? 'profile-tab-active' : ''} onClick={() => setTab('favorites')}><Bookmark size={15} />Избранное <span>{allJokes.filter((joke) => joke.favorited).length}</span><LockKeyhole size={12} /></button>}</div>{visible.length ? <div className="feed-grid profile-feed">{visible.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div> : <EmptyState title={tab === 'favorites' ? 'В избранном пока пусто' : isOwner ? 'Ваша первая шутка ещё впереди' : 'Публикаций пока нет'} text={tab === 'favorites' ? 'Сохранённые шутки доступны только вам.' : 'Новая авторская шутка появится здесь.'} button={isOwner && tab === 'posts' ? 'Добавить шутку' : undefined} onClick={onAdd} />}{tab === 'posts' && hasMore && <div className="feed-sentinel"><span>{loadingMore ? 'Загружаем публикации…' : 'У автора есть ещё публикации.'}</span><button disabled={loadingMore} onClick={() => void onLoadMore()}>{loadingMore ? 'Загружаем…' : 'Показать ещё'}</button></div>}</section>;
+  return <section className="profile-page"><div className="profile-cover"><span className="cover-orbit cover-orbit-a" /><span className="cover-orbit cover-orbit-b" /><span className="cover-glow" /><span className="cover-star cover-star-a">✦</span><span className="cover-star cover-star-b">✧</span><span className="cover-label">АВТОРСКАЯ ОРБИТА</span></div><div className="profile-identity"><div className="profile-avatar-wrap"><Avatar user={user} size="large" /></div><div className="profile-heading-copy"><div className="profile-name-row"><h1>{user.username}</h1>{isOwner && <span className="profile-owner-pill"><UserRound size={12} />Это вы</span>}</div><p>{user.bio || 'Описание не добавлено.'}</p><span className="profile-joined"><Clock3 size={13} />{joined}</span></div><div className="profile-actions"><button className="button button-secondary" onClick={() => { void shareProfile(); if (navigator.share) navigator.share({ title: `Профиль ${user.username}`, url: `${window.location.origin}/user/${user.id}` }).catch(() => undefined); }}><Share2 size={15} />Поделиться профилем</button>{isOwner && <>{authenticated ? <button type="button" className="profile-login-link" onClick={() => void onLogout()}>Выйти из аккаунта <ArrowUpRight size={12} /></button> : <a className="profile-login-link" href="/auth/yandex/login">Войти через Яндекс <ArrowUpRight size={12} /></a>}<button className="button button-primary" onClick={onAdd}><Plus size={15} />Новая шутка</button></>}</div></div><div className="profile-stats"><div><b>{jokeCount}</b><span>шуток</span></div><div><b>{likes.toLocaleString('ru-RU')}</b><span>лайков</span></div><div><b>{profileJokes.reduce((sum, joke) => sum + joke.favoritesCount, 0)}</b><span>сохранений</span></div></div><div className="profile-tabs"><button className={tab === 'posts' ? 'profile-tab-active' : ''} onClick={() => setTab('posts')}><FileText size={15} />Публикации <span>{jokeCount}</span></button>{isOwner && <button className={tab === 'favorites' ? 'profile-tab-active' : ''} onClick={() => setTab('favorites')}><Bookmark size={15} />Избранное <span>{allJokes.filter((joke) => joke.favorited).length}</span><LockKeyhole size={12} /></button>}</div>{visible.length ? <div className="feed-grid profile-feed">{visible.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div> : <EmptyState title={tab === 'favorites' ? 'В избранном пока пусто' : isOwner ? 'Ваша первая шутка ещё впереди' : 'Публикаций пока нет'} text={tab === 'favorites' ? 'Сохранённые шутки доступны только вам.' : 'Новая авторская шутка появится здесь.'} button={isOwner && tab === 'posts' ? 'Добавить шутку' : undefined} onClick={onAdd} />}{tab === 'posts' && hasMore && <div className="feed-sentinel"><span>{loadingMore ? 'Загружаем публикации…' : 'У автора есть ещё публикации.'}</span><button disabled={loadingMore} onClick={() => void onLoadMore()}>{loadingMore ? 'Загружаем…' : 'Показать ещё'}</button></div>}</section>;
 }
 
 function DetailPage({ joke, similar, onLike, onFavorite, onTag, onProfile, onOpen, onShare, onBack }: {
@@ -878,29 +888,6 @@ function DetailPage({ joke, similar, onLike, onFavorite, onTag, onProfile, onOpe
   onProfile: (id: string) => void; onOpen: (id: string) => void; onShare: (id: string) => void; onBack: () => void;
 }) {
   return <article className="detail-page"><button className="back-link" onClick={onBack}><ArrowRight size={14} className="back-arrow" />Назад к галактике</button><div className="detail-layout"><div className="detail-main"><div className="detail-kicker"><span className="cluster-dot" style={{ background: joke.cluster.color }} />{joke.cluster.name}<span>·</span><span>ШУТКА № {joke.id}</span></div><h1>{joke.text.replace(/\n/g, ' ')}</h1><div className="detail-byline"><button className="author-line" onClick={() => onProfile(joke.author.id)}><Avatar user={joke.author} size="normal" /><span><b>{joke.author.username}</b><small>Автор этой шутки</small></span></button><span className="detail-date"><Clock3 size={13} />{new Intl.DateTimeFormat('ru-RU', { day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(joke.createdAt))}</span></div><div className="detail-actions"><button className={`button button-secondary ${joke.liked ? 'button-liked' : ''}`} onClick={() => onLike(joke.id)}><Heart size={16} fill={joke.liked ? 'currentColor' : 'none'} />Нравится · {joke.likesCount}</button><button className={`button button-secondary ${joke.favorited ? 'button-liked' : ''}`} onClick={() => onFavorite(joke.id)}><Bookmark size={15} fill={joke.favorited ? 'currentColor' : 'none'} />В избранное</button><button className="button button-ghost" onClick={() => onShare(joke.id)}><Share2 size={15} />Поделиться</button></div><div className="detail-tags-block"><span className="section-kicker">СМЫСЛОВЫЕ ТРИГГЕРЫ</span><div className="detail-tags">{joke.triggers.map((tag) => <button key={tag} onClick={() => onTag(tag)}>#{tag}<ArrowUpRight size={11} /></button>)}</div></div><div className="detail-cluster-card"><span className="cluster-dot" style={{ background: joke.cluster.color }} /><div><b>Кластер «{joke.cluster.name}»</b><p>{joke.cluster.description}</p></div><button onClick={() => onTag(`cluster:${joke.cluster.slug}`)} aria-label="Открыть кластер"><ArrowUpRight size={15} /></button></div></div><aside className="detail-side"><span className="detail-side-orbit"><span /></span><span className="detail-side-kicker">НЕБО БЕЗ КОНЦА</span><b>У каждой шутки есть своя орбита.</b><p>Переходите по смысловым тегам и открывайте соседние темы.</p><div className="detail-side-stats"><span><Heart size={14} />{joke.likesCount} оценок</span><span><Bookmark size={14} />{joke.favoritesCount} сохранений</span></div></aside></div><section className="similar-section"><div className="feed-heading"><div><span className="section-kicker">СХОЖАЯ ОРБИТА</span><h2>Похожие шутки <span className="feed-count">{similar.length}</span></h2></div><span className="similar-note"><Compass size={14} />по теме и настроению</span></div>{similar.length ? <div className="feed-grid">{similar.map((item) => <JokeCard key={item.id} joke={item} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div> : <EmptyState title="Похожие шутки появятся скоро" text="Загляните в другие кластеры, пока эта орбита наполняется." />}</section></article>;
-}
-
-function AdminPage({ showToast }: { showToast: (message: string) => void }) {
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [progress, setProgress] = useState(0);
-  const [result, setResult] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  const upload = async () => {
-    if (!file) { showToast('Сначала выберите CSV-файл.'); return; }
-    setBusy(true); setProgress(10); setResult('Файл принят, проверяем структуру…');
-    try {
-      const form = new FormData(); form.append('file', file);
-      const response = await fetch('/api/admin/import-csv', { method: 'POST', body: form });
-      if (!response.ok) throw new Error('Нет доступа или сервер импорта недоступен.');
-      const payload = await response.json();
-      setProgress(100); setResult(`Импорт запущен. Задание № ${payload.job_id ?? '—'}. Статус можно проверить в панели редакции.`);
-      showToast('Импорт запущен в фоновом режиме.');
-    } catch (error) {
-      setProgress(100); setResult(error instanceof Error ? error.message : 'Не удалось запустить импорт. Проверьте права администратора.');
-    } finally { setBusy(false); }
-  };
-  return <section className="admin-page"><div className="page-intro"><div className="eyebrow"><span className="eyebrow-line" /> УПРАВЛЕНИЕ ГАЛАКТИКОЙ</div><h1>Панель <span>редакции.</span></h1><p>Импортируйте коллекции, проверяйте дубликаты и следите за очередью обработки.</p></div><div className="admin-notice"><Shield size={18} /><div><b>Доступ только для роли «администратор»</b><span>Загрузка CSV защищена серверной проверкой роли. Для работы импорта войдите через Яндекс ID с правами редакции.</span></div><a href="/auth/yandex/login" className="button button-secondary">Войти через Яндекс <ArrowUpRight size={14} /></a></div><div className="admin-grid"><section className="panel import-panel"><div className="step-kicker"><span>01</span> МАССОВЫЙ ИМПОРТ</div><h2>Загрузить CSV</h2><p>UTF-8, разделитель «;». Колонки: <code>id;text;triggers;cluster</code>.</p><input ref={inputRef} type="file" accept=".csv,text/csv" hidden onChange={(event) => setFile(event.target.files?.[0] ?? null)} /><button className="csv-dropzone" onClick={() => inputRef.current?.click()}><Upload size={23} /><b>{file?.name ?? 'Перетащите файл или выберите на устройстве'}</b><small>{file ? `${(file.size / 1024).toFixed(1)} КБ · готов к загрузке` : 'Максимальный размер — 10 МБ'}</small></button><div className="import-meta"><span><Zap size={13} />Обработка до 15 шуток в секунду</span><span><Sparkles size={13} />Теги и эмбеддинги — автоматически</span></div><button className="button button-primary import-button" disabled={busy || !file} onClick={() => void upload()}>{busy ? <LoaderCircle size={15} className="spin" /> : <Upload size={15} />}{busy ? 'Запускаем…' : 'Начать импорт'}<ArrowRight size={14} /></button>{result && <div className="import-result"><div className="progress-track"><span style={{ width: `${progress}%` }} /></div>{result}</div>}</section><section className="panel admin-queue"><div className="step-kicker"><span>02</span> ОЧЕРЕДЬ ЗАДАНИЙ</div><h2>Недавняя активность</h2><div className="queue-empty"><span><Clock3 size={17} /></span><b>Здесь появятся ваши импорты</b><small>Статус, обработанные строки и ошибки будут видны после загрузки файла.</small></div><div className="admin-quick-stats"><div><b>9</b><span>кластеров</span></div><div><b>0</b><span>дубликатов на проверке</span></div></div></section></div></section>;
 }
 
 function AdminConsole({ jokes, setJokes, onlineMode, showToast }: { jokes: Joke[]; setJokes: React.Dispatch<React.SetStateAction<Joke[]>>; onlineMode: boolean; showToast: (message: string) => void }) {
@@ -918,7 +905,7 @@ function AdminConsole({ jokes, setJokes, onlineMode, showToast }: { jokes: Joke[
 
   const loadModerationPage = useCallback(async (page: number, append: boolean) => {
     if (!onlineMode) {
-      setModerationMessage('В режиме предпросмотра показана демонстрационная коллекция. Модерация доступна после запуска сервера и входа администратора.');
+      setModerationMessage('Каталог недоступен без сервера. Модерация откроется после запуска сервера и входа администратора.');
       return;
     }
     setLoadingJokes(true);
@@ -1061,45 +1048,38 @@ function AddJokeModal({ onClose, onSave, onToast, onlineMode, authRequired }: { 
       setTriggers(response.triggers ?? []);
       if (response.cluster) setClusterSlug(response.cluster);
     } catch {
-      const first = rankLocally(text, starterJokes, 'text').keyword[0];
       const words = text.toLocaleLowerCase('ru').match(/[а-яё]{4,}/gi) ?? [];
-      setTriggers([...new Set([...(first?.triggers ?? []), ...words])].slice(0, 7));
-      if (first) setClusterSlug(first.cluster.slug);
+      setTriggers([...new Set(words)].slice(0, 7));
     } finally { setAnalyzing(false); }
   };
   const save = async () => {
+    if (!onlineMode) { onToast('Публикация доступна после подключения сервера.'); return; }
     if (authRequired) { onToast('Войдите через Яндекс ID, чтобы опубликовать шутку.'); return; }
     if (text.trim().length < 8) { onToast('Сначала напишите шутку.'); return; }
     setSaving(true);
-    const id = `local-${Date.now()}`;
-    let joke: Joke | null = null;
-    try { joke = await submitJoke(text.trim(), clusterSlug, triggers); }
-    catch (error) {
-      if (onlineMode) { setSaving(false); onToast(error instanceof Error ? error.message : 'Не удалось опубликовать шутку.'); return; }
-    }
-    if (!joke || !joke.id || !joke.cluster) {
-      joke = {
-        id, text: text.trim(), triggers: triggers.length ? triggers : ['авторская шутка', 'новое'], cluster: currentCluster,
-        author: demoUser, likesCount: 0, favoritesCount: 0, createdAt: new Date().toISOString(),
-        posX: Math.random() * 0.8 - 0.4, posY: Math.random() * 0.8 - 0.4, posZ: Math.random() * 0.8 - 0.4,
-      };
-    }
-    onSave(joke); setSaving(false);
+    try {
+      const joke = await submitJoke(text.trim(), clusterSlug, triggers);
+      if (!joke?.id || !joke.cluster) throw new Error('Сервер не подтвердил публикацию.');
+      onSave(joke);
+    } catch (error) {
+      onToast(error instanceof Error ? error.message : 'Не удалось опубликовать шутку.');
+    } finally { setSaving(false); }
   };
-  return <ModalFrame onClose={onClose} className="add-modal"><div className="modal-header"><span className="modal-orbit-icon"><Plus size={17} /></span><div><span className="section-kicker">ПОПОЛНИТЬ ГАЛАКТИКУ</span><h2>Поделитесь смешным</h2></div><button className="modal-close-inline" onClick={onClose} aria-label="Закрыть"><X size={17} /></button></div><p className="modal-intro">Одна хорошая шутка — уже своя маленькая звезда.</p><label className="field-label" htmlFor="joke-text">Текст шутки</label><textarea id="joke-text" className="modal-textarea" value={text} onChange={(event) => setText(event.target.value)} placeholder="Запишите шутку целиком — с паузами, если они важны…" maxLength={1400} /><div className="textarea-foot"><button className="ai-analyze-link" onClick={() => void analyze()} disabled={analyzing}>{analyzing ? <LoaderCircle size={14} className="spin" /> : <Wand2 size={14} />}{analyzing ? 'Анализируем…' : 'Подобрать теги и кластер'}</button><span>{text.length} / 1400</span></div><label className="field-label" htmlFor="cluster-select">Кластер</label><div className="select-wrap"><span className="cluster-dot" style={{ background: currentCluster.color }} /><select id="cluster-select" value={clusterSlug} onChange={(event) => setClusterSlug(event.target.value)}>{clusters.map((cluster) => <option value={cluster.slug} key={cluster.slug}>{cluster.name}</option>)}</select><ChevronDown size={15} /></div><div className="cluster-description">{currentCluster.description}</div>{triggers.length > 0 && <div className="draft-trigger-wrap"><span className="field-label">ИИ предложил теги</span><div className="draft-triggers">{triggers.map((trigger) => <span key={trigger}>#{trigger}<button onClick={() => setTriggers((current) => current.filter((tag) => tag !== trigger))} aria-label={`Удалить тег ${trigger}`}><X size={11} /></button></span>)}</div></div>}{authRequired && <p className="auth-required-note"><LockKeyhole size={13} />Для публикации нужна авторизация. <a href="/auth/yandex/login">Войти через Яндекс ID</a></p>}<div className="modal-footer"><span><LockKeyhole size={13} />Публикуя, вы соглашаетесь с правилами сообщества</span><button className="button button-primary" onClick={() => void save()} disabled={saving || authRequired || text.trim().length < 8}>{saving ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}{saving ? 'Публикуем…' : 'Опубликовать'}<ArrowRight size={14} /></button></div></ModalFrame>;
+  return <ModalFrame onClose={onClose} className="add-modal"><div className="modal-header"><span className="modal-orbit-icon"><Plus size={17} /></span><div><span className="section-kicker">ПОПОЛНИТЬ ГАЛАКТИКУ</span><h2>Поделитесь смешным</h2></div><button className="modal-close-inline" onClick={onClose} aria-label="Закрыть"><X size={17} /></button></div><p className="modal-intro">Одна хорошая шутка — уже своя маленькая звезда.</p><label className="field-label" htmlFor="joke-text">Текст шутки</label><textarea id="joke-text" className="modal-textarea" value={text} onChange={(event) => setText(event.target.value)} placeholder="Запишите шутку целиком — с паузами, если они важны…" maxLength={1400} /><div className="textarea-foot"><button className="ai-analyze-link" onClick={() => void analyze()} disabled={analyzing}>{analyzing ? <LoaderCircle size={14} className="spin" /> : <Wand2 size={14} />}{analyzing ? 'Анализируем…' : 'Подобрать теги и кластер'}</button><span>{text.length} / 1400</span></div><label className="field-label" htmlFor="cluster-select">Кластер</label><div className="select-wrap"><span className="cluster-dot" style={{ background: currentCluster.color }} /><select id="cluster-select" value={clusterSlug} onChange={(event) => setClusterSlug(event.target.value)}>{clusters.map((cluster) => <option value={cluster.slug} key={cluster.slug}>{cluster.name}</option>)}</select><ChevronDown size={15} /></div><div className="cluster-description">{currentCluster.description}</div>{triggers.length > 0 && <div className="draft-trigger-wrap"><span className="field-label">ИИ предложил теги</span><div className="draft-triggers">{triggers.map((trigger) => <span key={trigger}>#{trigger}<button onClick={() => setTriggers((current) => current.filter((tag) => tag !== trigger))} aria-label={`Удалить тег ${trigger}`}><X size={11} /></button></span>)}</div></div>}{!onlineMode && <p className="auth-required-note"><LockKeyhole size={13} />Публикация появится после подключения сервера.</p>}{onlineMode && authRequired && <p className="auth-required-note"><LockKeyhole size={13} />Для публикации нужна авторизация. <a href="/auth/yandex/login">Войти через Яндекс ID</a></p>}<div className="modal-footer"><span><LockKeyhole size={13} />Публикуя, вы соглашаетесь с правилами сообщества</span><button className="button button-primary" onClick={() => void save()} disabled={saving || authRequired || text.trim().length < 8}>{saving ? <LoaderCircle size={15} className="spin" /> : <Sparkles size={15} />}{saving ? 'Публикуем…' : 'Опубликовать'}<ArrowRight size={14} /></button></div></ModalFrame>;
 }
 
-function CreditsModal({ onClose, credits, setCredits, allowDemoTopUp, authenticated, email, onToast }: { onClose: () => void; credits: number; setCredits: React.Dispatch<React.SetStateAction<number>>; allowDemoTopUp: boolean; authenticated: boolean; email: string; onToast: (message: string) => void }) {
+function CreditsModal({ onClose, credits, backendAvailable, authenticated, email, onToast }: { onClose: () => void; credits: number; backendAvailable: boolean; authenticated: boolean; email: string; onToast: (message: string) => void }) {
   const packages = [
     { code: 'pack_50', count: 50, price: 50, label: 'На пробу', featured: false },
-    { code: 'pack_100', count: 100, price: 80, label: 'Самый популярный', featured: true },
+    { code: 'pack_100', count: 100, price: 80, label: 'Больше генераций', featured: true },
     { code: 'pack_200', count: 200, price: 140, label: 'Для регулярных выходов', featured: false },
   ];
   const [pending, setPending] = useState('');
   const [receiptEmail, setReceiptEmail] = useState(email);
   const buy = async (item: typeof packages[number]) => {
-    if (!allowDemoTopUp && !authenticated) { onToast('Войдите через Яндекс ID, чтобы оплатить пакет генераций.'); return; }
-    if (!allowDemoTopUp && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(receiptEmail.trim())) { onToast('Укажите email для электронного чека.'); return; }
+    if (!backendAvailable) { onToast('Пополнение доступно после подключения сервера.'); return; }
+    if (!authenticated) { onToast('Войдите через Яндекс ID, чтобы оплатить пакет генераций.'); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(receiptEmail.trim())) { onToast('Укажите email для электронного чека.'); return; }
     setPending(item.code);
     try {
       const response = await fetch('/api/payments/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ package_code: item.code, email: receiptEmail.trim() }) });
@@ -1107,16 +1087,10 @@ function CreditsModal({ onClose, credits, setCredits, allowDemoTopUp, authentica
       if (response.ok && payload?.confirmation_url) { window.location.assign(payload.confirmation_url); return; }
       throw new Error(payload?.error ?? 'Не удалось создать платёж.');
     } catch (error) {
-      if (allowDemoTopUp) {
-        setCredits((value) => value + item.count);
-        onToast(`Демо-пополнение: начислено ${item.count} генераций. Подключите ЮKassa для настоящей оплаты.`);
-        onClose();
-      } else {
-        onToast(error instanceof Error ? error.message : 'Не удалось связаться с ЮKassa.');
-      }
+      onToast(error instanceof Error ? error.message : 'Не удалось связаться с ЮKassa.');
     } finally { setPending(''); }
   };
-  return <ModalFrame onClose={onClose} className="credits-modal"><div className="modal-header"><span className="modal-orbit-icon credit-modal-icon"><Zap size={17} fill="currentColor" /></span><div><span className="section-kicker">ВАШ БАЛАНС · {credits} ГЕНЕРАЦИЙ</span><h2>Ещё немного сцены?</h2></div><button className="modal-close-inline" onClick={onClose} aria-label="Закрыть"><X size={17} /></button></div><p className="modal-intro">Одна генерация — один готовый вариант монолога. Выберите пакет, который подходит вашему темпу.</p><label className="field-label receipt-email-label" htmlFor="receipt-email">Email для электронного чека</label><input id="receipt-email" className="receipt-email-input" type="email" autoComplete="email" value={receiptEmail} onChange={(event) => setReceiptEmail(event.target.value)} placeholder="Введите email для чека" /><div className="package-list">{packages.map((item) => <button key={item.code} className={`package-option ${item.featured ? 'package-featured' : ''}`} onClick={() => void buy(item)} disabled={Boolean(pending)}><span className="package-radio"><i /></span><span className="package-copy"><b>{item.count} <small>генераций</small></b><span>{item.label}</span></span><span className="package-price">{pending === item.code ? <LoaderCircle size={17} className="spin" /> : <>{item.price}<small> ₽</small></>}</span>{item.featured && <span className="package-ribbon">ВЫГОДНЕЕ</span>}</button>)}</div><div className="payment-secure"><LockKeyhole size={13} /><span>Безопасная оплата через ЮKassa · электронный чек по 54-ФЗ</span><CreditCard size={16} /></div>{!allowDemoTopUp && !authenticated && <p className="auth-required-note"><LockKeyhole size={13} />Чтобы продолжить, <a href="/auth/yandex/login">войдите через Яндекс ID</a>.</p>}<div className="bonus-note"><Sparkles size={14} /><span>Каждый новый пользователь получает <b>50 генераций в подарок</b> после входа через Яндекс ID.</span></div></ModalFrame>;
+  return <ModalFrame onClose={onClose} className="credits-modal"><div className="modal-header"><span className="modal-orbit-icon credit-modal-icon"><Zap size={17} fill="currentColor" /></span><div><span className="section-kicker">ВАШ БАЛАНС · {credits} ГЕНЕРАЦИЙ</span><h2>Ещё немного сцены?</h2></div><button className="modal-close-inline" onClick={onClose} aria-label="Закрыть"><X size={17} /></button></div><p className="modal-intro">Одна генерация — один готовый вариант монолога. Выберите пакет, который подходит вашему темпу.</p>{!backendAvailable ? <p className="auth-required-note"><LockKeyhole size={13} />Оплата появится после подключения сервера.</p> : !authenticated ? <p className="auth-required-note"><LockKeyhole size={13} />Чтобы продолжить, <a href="/auth/yandex/login">войдите через Яндекс ID</a>.</p> : <><label className="field-label receipt-email-label" htmlFor="receipt-email">Email для электронного чека</label><input id="receipt-email" className="receipt-email-input" type="email" autoComplete="email" value={receiptEmail} onChange={(event) => setReceiptEmail(event.target.value)} placeholder="Введите email для чека" /><div className="package-list">{packages.map((item) => <button key={item.code} className={`package-option ${item.featured ? 'package-featured' : ''}`} onClick={() => void buy(item)} disabled={Boolean(pending)}><span className="package-radio"><i /></span><span className="package-copy"><b>{item.count} <small>генераций</small></b><span>{item.label}</span></span><span className="package-price">{pending === item.code ? <LoaderCircle size={17} className="spin" /> : <>{item.price}<small> ₽</small></>}</span>{item.featured && <span className="package-ribbon">ВЫГОДНЕЕ</span>}</button>)}</div><div className="payment-secure"><LockKeyhole size={13} /><span>Безопасная оплата через ЮKassa · электронный чек по 54-ФЗ</span><CreditCard size={16} /></div></>}{!authenticated && <div className="bonus-note"><Sparkles size={14} /><span>После входа новый аккаунт получит стартовые 50 генераций.</span></div>}</ModalFrame>;
 }
 
 export default App;

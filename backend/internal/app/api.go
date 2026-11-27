@@ -65,7 +65,6 @@ func (s *Server) handlePopularTriggers(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	for _, joke := range s.jokes { for _, trigger := range joke.Triggers { counts[trigger]++ } }
 	s.mu.RUnlock()
-	if len(counts) == 0 { counts = map[string]int{"программист": 8, "отношения": 7, "деньги": 6, "самоирония": 5, "работа": 5, "врач": 4} }
 	type triggerCount struct { Tag string `json:"tag"`; Count int `json:"count"` }
 	items := make([]triggerCount, 0, len(counts))
 	for tag, count := range counts { items = append(items, triggerCount{tag, count}) }
@@ -97,7 +96,6 @@ func (s *Server) analyze(ctx context.Context, text string) struct { Triggers []s
 
 func fallbackAnalysis(text string) struct { Triggers []string `json:"triggers"`; Cluster string `json:"cluster"` } {
 	triggers := fallbackTriggers(text)
-	if len(triggers) < 5 { triggers = appendUnique(triggers, "самоирония", "ситуация", "неожиданность", "юмор", "повседневность") }
 	if len(triggers) > 8 { triggers = triggers[:8] }
 	return struct { Triggers []string `json:"triggers"`; Cluster string `json:"cluster"` }{Triggers: triggers, Cluster: fallbackCluster(text)}
 }
@@ -166,7 +164,6 @@ func (s *Server) handleCreateJoke(w http.ResponseWriter, r *http.Request) {
 	if len([]rune(input.Text)) < 8 || len([]rune(input.Text)) > 1400 { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Текст шутки должен содержать от 8 до 1400 символов."}); return }
 	if len(input.Triggers) == 0 { analysis := s.analyze(r.Context(), input.Text); input.Triggers = analysis.Triggers; if input.Cluster == "" { input.Cluster = analysis.Cluster } }
 	input.Triggers = sanitizeTriggers(input.Triggers)
-	if len(input.Triggers) == 0 { input.Triggers = []string{"юмор", "авторская шутка", "повседневность"} }
 	cluster, exists := s.clusters[input.Cluster]
 	if !exists { cluster = s.clusters[fallbackCluster(input.Text)] }
 	if cluster.Slug == "" { cluster = s.clusters["puns"] }
@@ -272,7 +269,6 @@ func (s *Server) handleSuggestJokes(w http.ResponseWriter, r *http.Request) {
 func fallbackThemes(story string) []string {
 	words := fallbackTriggers(story)
 	if len(words) > 3 { words = words[:3] }
-	if len(words) == 0 { words = []string{"самоирония", "повседневность", "неожиданность"} }
 	return words
 }
 
@@ -285,6 +281,7 @@ func (s *Server) handleGenerateMonologue(w http.ResponseWriter, r *http.Request)
 	if len([]rune(input.Story)) < 12 || len([]rune(input.Story)) > 3500 { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "История должна содержать от 12 до 3500 символов."}); return }
 	if input.Style == "" { input.Style = "custom" }
 	if input.Style != "custom" && input.Style != "carlin" && input.Style != "zhvanetsky" && input.Style != "carter" { writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Неизвестный стиль подачи."}); return }
+	if strings.TrimSpace(s.cfg.DeepSeekAPIKey) == "" { writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "Генерация монолога недоступна: настройте DeepSeek API."}); return }
 	if !s.deductCredit(r.Context(), user.ID) { writeJSON(w, http.StatusPaymentRequired, map[string]string{"error": "На балансе нет генераций."}); return }
 
 	selected := make([]Joke, 0, len(input.JokeIDs))
@@ -314,14 +311,7 @@ func (s *Server) handleGenerateMonologue(w http.ResponseWriter, r *http.Request)
 		return nil
 	}
 
-	var generationErr error
-	if strings.TrimSpace(s.cfg.DeepSeekAPIKey) == "" {
-		for _, part := range localMonologueChunks(input.Story, input.Style, texts) {
-			if err := writeChunk(part); err != nil { generationErr = err; break }
-		}
-	} else {
-		generationErr = s.ai.StreamMonologue(r.Context(), input.Story, input.Style, texts, writeChunk)
-	}
+	generationErr := s.ai.StreamMonologue(r.Context(), input.Story, input.Style, texts, writeChunk)
 	if !started {
 		s.refundCredit(r.Context(), user.ID)
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Генерация не началась. Кредит возвращён на баланс."})
@@ -334,28 +324,6 @@ func (s *Server) handleGenerateMonologue(w http.ResponseWriter, r *http.Request)
 		if canFlush { flusher.Flush() }
 	}
 	s.saveStandupScript(r.Context(), user.ID, input.Story, input.Style, input.JokeIDs, generated.String())
-}
-
-func localMonologueChunks(story, style string, jokes []string) []string {
-	opening := "Я заметил, что самые смешные истории обычно начинаются словами «это займёт всего минуту». "
-	switch style {
-	case "carlin": opening = "Меня всегда удивляло, как много правил мы выполняем, не спросив, кто вообще их придумал. "
-	case "zhvanetsky": opening = "Случай был небольшой. Просто после него пришлось пересмотреть всё расписание. "
-	case "carter": opening = "Я долго делал вид, что меня это совсем не задевает. А потом понял: задевает. И ещё как. "
-	}
-	storyLine := strings.Trim(strings.TrimSpace(story), " .!?\n")
-	text := opening + "\n\nНедавно у меня случилась история: " + storyLine + ". И, конечно, я сразу выбрал самый сложный способ решить простую задачу. "
-	if len(jokes) > 0 { text += "\n\nПотом я вспомнил: " + strings.Join(jokes, "\n\n") + "\n\n" }
-	text += "И тут стало ясно: иногда лучший план — это признать, что план был частью проблемы. Спасибо!"
-	parts := strings.Fields(text)
-	chunks := make([]string, 0, len(parts)/3+1)
-	for i := 0; i < len(parts); i += 3 {
-		end := i + 3; if end > len(parts) { end = len(parts) }
-		chunk := strings.Join(parts[i:end], " ")
-		if end < len(parts) { chunk += " " }
-		chunks = append(chunks, chunk)
-	}
-	return chunks
 }
 
 func (s *Server) deductCredit(ctx context.Context, userID int64) bool {

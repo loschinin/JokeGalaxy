@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS users (
     id BIGSERIAL PRIMARY KEY,
     yandex_id TEXT UNIQUE,
     email TEXT NOT NULL DEFAULT '',
-    username TEXT NOT NULL DEFAULT 'Космический гость',
+    username TEXT NOT NULL DEFAULT '',
     avatar_url TEXT NOT NULL DEFAULT '',
     bio TEXT NOT NULL DEFAULT '',
     role TEXT NOT NULL DEFAULT 'user' CHECK (role IN ('user', 'admin')),
@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
     onboarding_completed BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+ALTER TABLE users ALTER COLUMN username SET DEFAULT '';
 
 CREATE TABLE IF NOT EXISTS clusters (
     id BIGSERIAL PRIMARY KEY,
@@ -110,6 +111,15 @@ CREATE TABLE IF NOT EXISTS import_jobs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     finished_at TIMESTAMPTZ
 );
+
+-- Remove only the exact synthetic editorial account created by older versions; its jokes cascade-delete.
+DELETE FROM users
+WHERE yandex_id IS NULL
+  AND email = 'editor@jokegalaxy.local'
+  AND username = 'Редакция Галактики'
+  AND bio = 'Шутки, с которых начинается исследование.'
+  AND role = 'user'
+  AND standup_credits = 50;
 
 INSERT INTO clusters (name, slug, color, description) VALUES
 ('Каламбуры и игра слов', 'puns', '#FFD700', 'Омофоны, двусмысленности, искажённые слова, абсурдные факты.'),

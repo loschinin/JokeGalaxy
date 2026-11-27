@@ -1,5 +1,5 @@
 import type { Joke, JokeSearchResponse, SearchMode } from './types';
-import { jokes, rankLocally } from './data';
+import { rankLocally } from './data';
 
 export class ApiError extends Error {
   constructor(message: string, readonly status: number) {
@@ -24,12 +24,11 @@ export async function loadJokes(page = 1, filters: Record<string, string> = {}):
     const result = await getJSON<{ jokes: Joke[]; has_more?: boolean }>(`/api/jokes?${query}`);
     return { jokes: result.jokes, hasMore: result.has_more ?? result.jokes.length === 12 };
   } catch {
-    const start = (page - 1) * 12;
-    return { jokes: jokes.slice(start, start + 12), hasMore: start + 12 < jokes.length };
+    return { jokes: [], hasMore: false };
   }
 }
 
-export async function searchJokes(query: string, mode: SearchMode, source: Joke[] = jokes): Promise<JokeSearchResponse> {
+export async function searchJokes(query: string, mode: SearchMode, source: Joke[] = []): Promise<JokeSearchResponse> {
   try {
     return await getJSON<JokeSearchResponse>(`/api/search?q=${encodeURIComponent(query)}&mode=${mode}`);
   } catch {
