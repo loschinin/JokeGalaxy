@@ -95,12 +95,12 @@ func New(config Config) (*Server, error) {
 		likes: make(map[Relation]bool), favorites: make(map[Relation]bool), imports: make(map[string]*ImportStatus),
 		nextJokeID: 1, nextUserID: 1,
 	}
-	server.seedMemory()
+	server.initializeClusters()
 
 	if strings.TrimSpace(config.DatabaseURL) != "" {
 		db, err := sql.Open("pgx", config.DatabaseURL)
 		if err != nil {
-			log.Printf("PostgreSQL disabled; using RAM demo store: %v", err)
+			log.Printf("PostgreSQL disabled; using empty in-memory store: %v", err)
 		} else {
 			db.SetMaxOpenConns(12)
 			db.SetMaxIdleConns(4)
@@ -109,12 +109,11 @@ func New(config Config) (*Server, error) {
 			err = db.PingContext(ctx)
 			cancel()
 			if err != nil {
-				log.Printf("PostgreSQL unavailable; using RAM demo store: %v", err)
+				log.Printf("PostgreSQL unavailable; using empty in-memory store: %v", err)
 				_ = db.Close()
 			} else {
 				server.db = db
 				if err := server.runMigrations(); err != nil { log.Printf("migration warning: %v", err) }
-				if err := server.seedDatabase(); err != nil { log.Printf("database seed warning: %v", err) }
 				if err := server.loadDatabaseCache(); err != nil { log.Printf("database cache warning: %v", err) }
 			}
 		}
@@ -188,27 +187,6 @@ func splitSQLStatements(source string) []string {
 	return statements
 }
 
-func (s *Server) seedDatabase() error {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	var count int
-	if err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM jokes`).Scan(&count); err != nil { return err }
-	if count > 0 { return nil }
-	var authorID int64
-	err := s.db.QueryRowContext(ctx, `INSERT INTO users (username, email, bio) VALUES ($1, $2, $3) RETURNING id`, "Редакция Галактики", "editor@jokegalaxy.local", "Шутки, с которых начинается исследование.").Scan(&authorID)
-	if err != nil { return err }
-	for _, sample := range sampleSeeds() {
-		cluster, ok := s.clusters[sample.cluster]
-		if !ok { continue }
-		vector := hashEmbedding("Темы: " + strings.Join(sample.triggers, ", ") + ". " + sample.text)
-		bytes := embeddingBytes(vector)
-		pos := s.placeCoordinates(vector)
-		_, err := s.db.ExecContext(ctx, `INSERT INTO jokes (user_id, text, triggers, cluster, pos_x, pos_y, pos_z, embedding, likes_count, favorites_count) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, authorID, sample.text, sample.triggers, cluster.Slug, pos[0], pos[1], pos[2], bytes, sample.likes, sample.likes/7)
-		if err != nil { log.Printf("seed joke: %v", err) }
-	}
-	return nil
-}
-
 func (s *Server) loadDatabaseCache() error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -240,8 +218,8 @@ func (s *Server) loadDatabaseCache() error {
 	return nil
 }
 
-func (s *Server) seedMemory() {
-	defaults := []Cluster{
+func (s *Server) initializeClusters() {
+	clusters := []Cluster{
 		{ID: 1, Name: "Каламбуры и игра слов", Slug: "puns", Color: "#FFD700", Description: "Омофоны, двусмысленности, искажённые слова, абсурдные факты."},
 		{ID: 2, Name: "IT и программисты", Slug: "it", Color: "#00E5FF", Description: "Разработка, баги, костыли, собеседования, админы, нейросети."},
 		{ID: 3, Name: "Отношения, семья и секс", Slug: "relationships", Color: "#FF4081", Description: "Муж и жена, свидания, тёща, любовники, 18+, флирт."},
@@ -252,62 +230,7 @@ func (s *Server) seedMemory() {
 		{ID: 8, Name: "Кино, герои и фольклор", Slug: "heroes", Color: "#448AFF", Description: "Штирлиц, Ржевский, сказки, животные, книги, поп-культура."},
 		{ID: 9, Name: "Черный юмор и философия", Slug: "dark-philosophy", Color: "#B0BEC5", Description: "Сарказм, цинизм, старость, похороны, экзистенциальная ирония."},
 	}
-	for _, cluster := range defaults { s.clusters[cluster.Slug] = cluster }
-	seedAuthor := User{ID: 1, Username: "Редакция Галактики", Email: "editor@jokegalaxy.local", Bio: "Первые орбиты коллекции.", Role: "user", StandupCredits: 50, CreatedAt: time.Now()}
-	s.users[seedAuthor.ID] = seedAuthor
-	s.nextUserID = 2
-	for index, sample := range sampleSeeds() {
-		cluster := s.clusters[sample.cluster]
-		id := int64(index + 1)
-		angle := float64(index) * 2.399963
-		radius := .28 + float64(index%7)*.105
-		vector := hashEmbedding("Темы: " + strings.Join(sample.triggers, ", ") + ". " + sample.text)
-		joke := Joke{
-			ID: strconv.FormatInt(id, 10), Text: sample.text, Triggers: append([]string(nil), sample.triggers...), Cluster: cluster,
-			Author: Author{ID: "1", Username: seedAuthor.Username, Bio: seedAuthor.Bio}, LikesCount: sample.likes, FavoritesCount: sample.likes / 7,
-			CreatedAt: time.Now().Add(-time.Duration(index) * 7 * time.Hour), PosX: math.Cos(angle)*radius, PosY: math.Sin(angle)*radius*.72, PosZ: math.Sin(angle*.56)*radius,
-			Embedding: embeddingBytes(vector), UserID: 1,
-		}
-		s.jokes[id] = joke
-		s.vectors[id] = vector
-		s.coordinates[id] = [3]float64{joke.PosX, joke.PosY, joke.PosZ}
-	}
-	s.nextJokeID = int64(len(s.jokes) + 1)
-}
-
-type seedJoke struct { text string; cluster string; triggers []string; likes int }
-
-func sampleSeeds() []seedJoke {
-	return []seedJoke{
-		{"— Почему программист не любит природу?\n— Там слишком много багов, а исправлять их некому.", "it", []string{"программист", "баги", "природа", "работа"}, 148},
-		{"На собеседовании спросили, умею ли я работать в команде.\nСказал: «Конечно. Я уже десять лет убеждаю себя, что мы справимся».", "work-money", []string{"собеседование", "команда", "офис", "самоирония"}, 97},
-		{"— Ты меня слушаешь?\n— Конечно. Просто у меня лицо загружается отдельно от мыслей.", "relationships", []string{"отношения", "разговор", "внимание", "семья"}, 84},
-		{"Врач сказал: «Вам нужен покой».\nТеперь я не отвечаю даже на сообщения от банка. Лечусь комплексно.", "medicine", []string{"врач", "покой", "здоровье", "банк"}, 126},
-		{"Купил ежедневник для планирования бюджета.\nТеперь я точно знаю, в какой день у меня закончатся деньги.", "work-money", []string{"деньги", "бюджет", "планирование", "зарплата"}, 113},
-		{"— Почему календарь такой спокойный?\n— У него все дни расписаны.", "puns", []string{"календарь", "расписание", "двусмысленность", "слова"}, 204},
-		{"Учительница: «Кто назовёт два местоимения?»\nВовочка: «Кто, я?» — «Молодец, оба правильно!»", "study-army", []string{"школа", "местоимение", "Вовочка", "урок"}, 102},
-		{"Штирлиц долго смотрел на карту. Карта смотрела в ответ.\nОба понимали: маршрут домой опять построен через ремонт.", "heroes", []string{"Штирлиц", "карта", "ремонт", "кино"}, 76},
-		{"Оптимист видит свет в конце тоннеля.\nПессимист — поезд. Реалист — расписание задержек.", "dark-philosophy", []string{"оптимист", "тоннель", "поезд", "ирония"}, 165},
-		{"— Как понять, что сервер устал?\n— Он начинает отвечать: «Я подумаю над этим после перезагрузки».", "it", []string{"сервер", "усталость", "перезагрузка", "технологии"}, 92},
-		{"В аптеке спросили: «Вам что-нибудь от нервов?»\n«Да. Скажите, что очередь движется быстрее, чем кажется».", "medicine", []string{"аптека", "очередь", "нервы", "ожидание"}, 68},
-		{"В семье главное — уметь уступать.\nНапример, я уступил жене право выбирать фильм. Уже третий раз пересматриваем её выбор.", "relationships", []string{"семья", "фильм", "компромисс", "вечер"}, 88},
-		{"Начальник сказал: «Нам нужна команда, которая горит работой».\nПосле этих слов офис проверили на пожарную безопасность.", "work-money", []string{"начальник", "команда", "офис", "выгорание"}, 132},
-		{"Налоговая прислала письмо: «Мы вас нашли».\nЯ ответил: «А я вас и не терял».", "politics", []string{"налоги", "письмо", "государство", "переписка"}, 119},
-		{"Студент так долго готовился к экзамену, что в итоге сдал не предмет, а надежду.", "study-army", []string{"студент", "экзамен", "подготовка", "учёба"}, 109},
-		{"Дракон охранял сокровища так надёжно, что сам не мог вспомнить пароль от пещеры.", "heroes", []string{"дракон", "сказка", "пароль", "сокровища"}, 81},
-		{"— Ты уже взрослый?\n— По документам да. По ощущениям — всё ещё жду, когда придёт взрослый и всё объяснит.", "dark-philosophy", []string{"взрослая жизнь", "документы", "ожидание", "самоирония"}, 157},
-		{"Программист поставил будильник на пять минут раньше.\nТеперь он опаздывает с запасом.", "it", []string{"будильник", "программист", "время", "опоздание"}, 73},
-		{"Слова «всё под контролем» особенно убедительно звучат, когда их произносит человек с открытым зонтом в помещении.", "puns", []string{"контроль", "зонт", "слова", "абсурд"}, 61},
-		{"Психолог спросил, умею ли я говорить «нет».\nЯ ответил: «Да, но только если вы не против».", "medicine", []string{"психолог", "границы", "нет", "вежливость"}, 95},
-		{"Премия — это когда зарплата на секунду заходит в гости и оставляет чаевые.", "work-money", []string{"премия", "зарплата", "деньги", "офис"}, 141},
-		{"В очереди за справкой я познакомился с человеком, который пришёл вчера.\nТеперь у меня есть друг и пример для подражания.", "politics", []string{"очередь", "справка", "ожидание", "бюрократия"}, 64},
-		{"На контрольной учитель сказал: «Работаем самостоятельно».\nКласс впервые за год понял, что это не название предмета.", "study-army", []string{"контрольная", "учитель", "самостоятельность", "школа"}, 93},
-		{"Смотрю фильм про путешествия во времени.\nОчень удобно: если сюжет не понравится, перемотаю до момента, когда ещё не включил.", "heroes", []string{"кино", "время", "сюжет", "путешествие"}, 117},
-		{"Жизнь — это длинный список дел, который почему-то не заканчивается после того, как ты вычеркнул слово «жизнь».", "dark-philosophy", []string{"жизнь", "список дел", "философия", "ирония"}, 188},
-		{"Умный дом сам заказал фильтр для воды.\nПохоже, теперь в семье только он умеет заботиться о будущем.", "it", []string{"умный дом", "покупки", "технологии", "семья"}, 86},
-		{"— Почему у слова «коротко» столько букв?\n— Чтобы оно успело высказаться.", "puns", []string{"слова", "буквы", "коротко", "каламбур"}, 224},
-		{"На свидании я сказал: «Я люблю спонтанность».\nМы спонтанно обсудили, почему оба выбрали ресторан по отзывам.", "relationships", []string{"свидание", "спонтанность", "ресторан", "отношения"}, 91},
-	}
+	for _, cluster := range clusters { s.clusters[cluster.Slug] = cluster }
 }
 
 func hashEmbedding(text string) []float32 {

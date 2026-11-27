@@ -164,7 +164,7 @@ func (s *Server) yandexCallback(w http.ResponseWriter, r *http.Request) {
 	username := profile.DisplayName
 	if username == "" { username = profile.RealName }
 	if username == "" { username = profile.Login }
-	if username == "" { username = "Автор Галактики" }
+	if username == "" { username = "Пользователь" }
 	avatar := ""
 	if profile.AvatarID != "" { avatar = "https://avatars.yandex.net/get-yapic/" + url.PathEscape(profile.AvatarID) + "/islands-200" }
 	user, err := s.upsertYandexUser(ctx, profile.ID, profile.DefaultEmail, username, avatar)
