@@ -1,0 +1,19 @@
+# Frontend dependencies and generated output
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Environment files and local secrets
+.env
+.env.*
+!.env.example
+backend/.env
+
+# Go build/test output
+/backend/jokegalaxy
+/backend/server
+*.test
+
+# Logs and coverage
+*.log
+coverage/
