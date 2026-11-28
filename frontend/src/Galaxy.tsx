@@ -71,10 +71,14 @@ function projectGalaxyPositions(jokes: Joke[]): GalaxyPosition[] {
 
 export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }: GalaxyProps) {
   const mountRef = useRef<HTMLDivElement>(null);
+  const selectedInfoRef = useRef<HTMLDivElement>(null);
+  const selectedIdRef = useRef(selectedId);
   const callbacksRef = useRef({ onSelect, onHover });
+  const selectedJoke = selectedId ? jokes.find((joke) => joke.id === selectedId) : undefined;
   const [isReady, setIsReady] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
+  selectedIdRef.current = selectedId;
   callbacksRef.current = { onSelect, onHover };
 
   useEffect(() => {
@@ -130,9 +134,11 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       const material = new THREE.MeshBasicMaterial({ color: joke.cluster.color, transparent: true, opacity: isHighlighted ? 0.96 : 0.19 });
       const point = new THREE.Mesh(pointGeometry, material);
       const [x, y, z] = layoutPositions[index];
+      const defaultScale = highlightedIds?.has(joke.id) ? 1.24 : 0.88 + (index % 4) * 0.07;
       point.position.set(x, y, z);
-      point.scale.setScalar(joke.id === selectedId ? 1.55 : highlightedIds?.has(joke.id) ? 1.24 : 0.88 + (index % 4) * 0.07);
+      point.scale.setScalar(joke.id === selectedIdRef.current ? 1.55 : defaultScale);
       point.userData.jokeId = joke.id;
+      point.userData.defaultScale = defaultScale;
       cloud.add(point);
       pointMeshes.push(point);
       jokeForMesh.set(point, joke);
@@ -164,6 +170,9 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
     const halo = new THREE.Mesh(new THREE.RingGeometry(0.1, 0.15, 32), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.83, side: THREE.DoubleSide }));
     halo.visible = false;
     cloud.add(halo);
+    const projectedSelectedPosition = new THREE.Vector3();
+    let activeSelectedId = selectedIdRef.current;
+    let lastSelectedAnchor = { x: 0, y: 0 };
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
     let width = 1;
@@ -183,6 +192,7 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       camera.updateProjectionMatrix();
     };
     resize();
+    lastSelectedAnchor = { x: width / 2, y: height / 2 };
     const resizeObserver = new ResizeObserver(resize);
     resizeObserver.observe(mount);
 
@@ -251,7 +261,16 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       animationFrame = window.requestAnimationFrame(animate);
       cloud.rotation.y += isDragging ? 0 : 0.00032;
       stars.rotation.y -= 0.000035;
-      const selectedMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === selectedId);
+
+      const currentSelectedId = selectedIdRef.current;
+      if (currentSelectedId !== activeSelectedId) {
+        const previousMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === activeSelectedId);
+        previousMesh?.scale.setScalar(previousMesh.userData.defaultScale ?? 1);
+        const nextMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === currentSelectedId);
+        nextMesh?.scale.setScalar(1.55);
+        activeSelectedId = currentSelectedId;
+      }
+      const selectedMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === currentSelectedId);
       halo.visible = Boolean(selectedMesh);
       if (selectedMesh) {
         halo.position.copy(selectedMesh.position);
@@ -260,6 +279,55 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
         halo.scale.setScalar(pulse + 0.2);
       }
       renderer.render(scene, camera);
+
+      const selectedInfo = selectedInfoRef.current;
+      if (selectedInfo) {
+        if (selectedMesh) {
+          selectedMesh.getWorldPosition(projectedSelectedPosition);
+          projectedSelectedPosition.project(camera);
+          if (projectedSelectedPosition.z >= -1 && projectedSelectedPosition.z <= 1) {
+            lastSelectedAnchor = {
+              x: Math.min(width - 8, Math.max(8, (projectedSelectedPosition.x + 1) * 0.5 * width)),
+              y: Math.min(height - 8, Math.max(8, (1 - projectedSelectedPosition.y) * 0.5 * height)),
+            };
+          }
+
+          const infoWidth = selectedInfo.offsetWidth;
+          const infoHeight = selectedInfo.offsetHeight;
+          const gap = 14;
+          const margin = 12;
+          const safeTop = document.fullscreenElement === mount ? 62 : 88;
+          const safeBottom = 44;
+          const canPlaceRight = lastSelectedAnchor.x + gap + infoWidth <= width - margin;
+          const canPlaceLeft = lastSelectedAnchor.x - gap - infoWidth >= margin;
+          let side: 'right' | 'left' | 'top' | 'bottom';
+          let left: number;
+          let top: number;
+
+          if (canPlaceRight) {
+            side = 'right';
+            left = lastSelectedAnchor.x + gap;
+            top = lastSelectedAnchor.y - infoHeight / 2;
+          } else if (canPlaceLeft) {
+            side = 'left';
+            left = lastSelectedAnchor.x - infoWidth - gap;
+            top = lastSelectedAnchor.y - infoHeight / 2;
+          } else {
+            left = Math.min(width - infoWidth - margin, Math.max(margin, lastSelectedAnchor.x - infoWidth / 2));
+            const canPlaceBelow = lastSelectedAnchor.y + gap + infoHeight <= height - safeBottom;
+            side = canPlaceBelow ? 'bottom' : 'top';
+            top = canPlaceBelow ? lastSelectedAnchor.y + gap : lastSelectedAnchor.y - infoHeight - gap;
+          }
+
+          const maxLeft = Math.max(margin, width - infoWidth - margin);
+          const maxTop = Math.max(safeTop, height - infoHeight - safeBottom);
+          selectedInfo.dataset.side = side;
+          selectedInfo.style.transform = `translate3d(${Math.min(maxLeft, Math.max(margin, left))}px, ${Math.min(maxTop, Math.max(safeTop, top))}px, 0)`;
+          selectedInfo.style.visibility = 'visible';
+        } else {
+          selectedInfo.style.visibility = 'hidden';
+        }
+      }
     };
     animate();
     setIsReady(true);
@@ -290,10 +358,25 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       renderer.domElement.remove();
       setIsReady(false);
     };
-  }, [jokes, selectedId, highlightedIds]);
+  }, [jokes, highlightedIds]);
 
   return <div className={`galaxy-viewport ${isReady ? 'is-ready' : ''}`} ref={mountRef}>
     {!isReady && <div className="galaxy-fallback" aria-hidden="true"><span className="fallback-orbit orbit-one" /><span className="fallback-orbit orbit-two" /><span className="fallback-core" /></div>}
+    {selectedJoke && <div
+      className="galaxy-selected-info"
+      ref={selectedInfoRef}
+      role="status"
+      aria-live="polite"
+      aria-atomic="true"
+      style={{ visibility: 'hidden' }}
+    >
+      <div className="galaxy-selected-cluster">
+        <span className="galaxy-selected-cluster-dot" style={{ backgroundColor: selectedJoke.cluster.color }} aria-hidden="true" />
+        <span className="galaxy-selected-cluster-label">КЛАСТЕР</span>
+        <span className="galaxy-selected-cluster-name">{selectedJoke.cluster.name}</span>
+      </div>
+      <p className="galaxy-selected-text">{selectedJoke.text}</p>
+    </div>}
     {fullscreenSupported && <button
       type="button"
       className="galaxy-fullscreen-toggle"
