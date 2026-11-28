@@ -52,8 +52,11 @@ function initials(name: string) {
 function Avatar({ user, size = 'normal' }: { user: Author; size?: 'small' | 'normal' | 'large' }) {
   const colors = ['#f4c46d', '#63d7dd', '#a990ff', '#fb779d', '#6ca9ff'];
   const color = colors[(user.username.length + user.id.length) % colors.length];
+  const avatarUrl = user.avatarUrl?.trim();
+  const [failedAvatarUrl, setFailedAvatarUrl] = useState<string>();
   return <span className={`avatar avatar-${size}`} style={{ '--avatar-color': color } as React.CSSProperties} aria-label={user.username}>
-    <span>{initials(user.username)}</span>
+    <span aria-hidden="true">{initials(user.username)}</span>
+    {avatarUrl && failedAvatarUrl !== avatarUrl && <img src={avatarUrl} alt="" loading="lazy" decoding="async" onError={() => setFailedAvatarUrl(avatarUrl)} />}
   </span>;
 }
 
