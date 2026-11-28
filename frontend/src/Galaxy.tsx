@@ -12,7 +12,7 @@ interface GalaxyProps {
   isSearching: boolean;
   onSearchTextChange: (value: string) => void;
   onSearch: (query: string) => void;
-  onSelect: (joke: Joke | null) => void;
+  onSelect: (joke: Joke) => void;
   onHover?: (joke: Joke | null) => void;
 }
 
@@ -83,16 +83,23 @@ export function Galaxy({
   const selectedIdRef = useRef(selectedId);
   const highlightedIdsRef = useRef(highlightedIds);
   const callbacksRef = useRef({ onSelect, onHover });
-  const selectedJoke = selectedId ? jokes.find((joke) => joke.id === selectedId) : undefined;
   const visibleSearchCount = highlightedIds
     ? jokes.slice(0, 600).filter((joke) => highlightedIds.has(joke.id)).length
     : 0;
   const [isReady, setIsReady] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
+  const [dismissedTooltipId, setDismissedTooltipId] = useState<string | null>(null);
+  const selectedJoke = selectedId && selectedId !== dismissedTooltipId
+    ? jokes.find((joke) => joke.id === selectedId)
+    : undefined;
   selectedIdRef.current = selectedId;
   highlightedIdsRef.current = highlightedIds;
   callbacksRef.current = { onSelect, onHover };
+
+  useEffect(() => {
+    setDismissedTooltipId(null);
+  }, [selectedId]);
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -254,7 +261,12 @@ export function Galaxy({
       setFromEvent(event);
       const hit = raycaster.intersectObjects(pointMeshes, false)[0];
       const joke = hit ? jokeForMesh.get(hit.object) : undefined;
-      callbacksRef.current.onSelect(joke ?? null);
+      if (joke) {
+        setDismissedTooltipId(null);
+        callbacksRef.current.onSelect(joke);
+      } else if (selectedIdRef.current) {
+        setDismissedTooltipId(selectedIdRef.current);
+      }
     };
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
