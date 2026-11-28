@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import * as THREE from 'three';
 import type { Joke } from './types';
 
@@ -72,7 +73,30 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
   const mountRef = useRef<HTMLDivElement>(null);
   const callbacksRef = useRef({ onSelect, onHover });
   const [isReady, setIsReady] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [fullscreenSupported, setFullscreenSupported] = useState(false);
   callbacksRef.current = { onSelect, onHover };
+
+  useEffect(() => {
+    const mount = mountRef.current;
+    if (!mount) return;
+    setFullscreenSupported(Boolean(document.fullscreenEnabled && typeof mount.requestFullscreen === 'function'));
+    const syncFullscreenState = () => setIsFullscreen(document.fullscreenElement === mount);
+    document.addEventListener('fullscreenchange', syncFullscreenState);
+    syncFullscreenState();
+    return () => document.removeEventListener('fullscreenchange', syncFullscreenState);
+  }, []);
+
+  const toggleFullscreen = async () => {
+    const mount = mountRef.current;
+    if (!mount || !fullscreenSupported) return;
+    try {
+      if (document.fullscreenElement === mount) await document.exitFullscreen();
+      else await mount.requestFullscreen();
+    } catch {
+      // Keep the inline map usable if the browser or embedding context denies fullscreen.
+    }
+  };
 
   useEffect(() => {
     const mount = mountRef.current;
@@ -270,6 +294,17 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
 
   return <div className={`galaxy-viewport ${isReady ? 'is-ready' : ''}`} ref={mountRef}>
     {!isReady && <div className="galaxy-fallback" aria-hidden="true"><span className="fallback-orbit orbit-one" /><span className="fallback-orbit orbit-two" /><span className="fallback-core" /></div>}
+    {fullscreenSupported && <button
+      type="button"
+      className="galaxy-fullscreen-toggle"
+      onClick={() => void toggleFullscreen()}
+      aria-label={isFullscreen ? 'Выйти из полноэкранного режима' : 'Развернуть карту на весь экран'}
+      aria-pressed={isFullscreen}
+      title={isFullscreen ? 'Выйти из полноэкранного режима' : 'Развернуть карту на весь экран'}
+    >
+      {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+      <span>{isFullscreen ? 'Выйти из полного экрана' : 'На весь экран'}</span>
+    </button>}
     <div className="galaxy-instructions"><span className="mouse-glyph">✣</span> Перетаскивайте · колесо — масштаб</div>
   </div>;
 }
