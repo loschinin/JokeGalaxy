@@ -676,7 +676,18 @@ function HomePage(props: {
     <section className="explore-grid">
       <div className="panel galaxy-panel">
         <div className="panel-heading galaxy-heading"><div><div className="panel-title-line"><span className="orbit-mark"><span /></span><h2>Карта юмора</h2><span className="live-pill"><span />{allJokes.length ? 'В эфире' : 'Пока пусто'}</span></div><p>Каждая точка — шутка. Рядом те, что говорят на похожем языке.</p></div><button className="icon-button muted-icon-button" onClick={() => { if (allJokes.length) setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)]); }} disabled={!allJokes.length} aria-label="Случайная шутка"><Sparkles size={16} /></button></div>
-        <div className="galaxy-stage"><Suspense fallback={<div className="galaxy-loading">Загружаем трёхмерную карту…</div>}><Galaxy jokes={galaxyJokes} selectedId={selectedJoke?.id} highlightedIds={allSearchResultIds} onSelect={setSelectedJoke} onHover={setHoveredJoke} /></Suspense>
+        <div className="galaxy-stage"><Suspense fallback={<div className="galaxy-loading">Загружаем трёхмерную карту…</div>}><Galaxy
+          jokes={galaxyJokes}
+          selectedId={selectedJoke?.id}
+          highlightedIds={submittedQuery ? allSearchResultIds : undefined}
+          searchText={searchText}
+          submittedQuery={submittedQuery}
+          isSearching={isSearching}
+          onSearchTextChange={setSearchText}
+          onSearch={(query) => { void runSearch(query); }}
+          onSelect={setSelectedJoke}
+          onHover={setHoveredJoke}
+        /></Suspense>
           {hoveredJoke && <div className="galaxy-hover-card"><span className="cluster-dot" style={{ background: hoveredJoke.cluster.color }} /><span>{hoveredJoke.text.replace(/\n/g, ' ').slice(0, 88)}{hoveredJoke.text.length > 88 ? '…' : ''}</span><ArrowUpRight size={14} /></div>}
           <div className="galaxy-stat"><span className="galaxy-stat-number">{galaxyJokes.length.toLocaleString('ru-RU')}</span><span>точек в поле зрения</span></div>
         </div>

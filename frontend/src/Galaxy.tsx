@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { ArrowRight, LoaderCircle, Maximize2, Minimize2, Search, X } from 'lucide-react';
 import * as THREE from 'three';
 import type { Joke } from './types';
 
@@ -7,7 +7,12 @@ interface GalaxyProps {
   jokes: Joke[];
   selectedId?: string;
   highlightedIds?: Set<string>;
-  onSelect: (joke: Joke) => void;
+  searchText: string;
+  submittedQuery: string;
+  isSearching: boolean;
+  onSearchTextChange: (value: string) => void;
+  onSearch: (query: string) => void;
+  onSelect: (joke: Joke | null) => void;
   onHover?: (joke: Joke | null) => void;
 }
 
@@ -69,16 +74,24 @@ function projectGalaxyPositions(jokes: Joke[]): GalaxyPosition[] {
   )) as GalaxyPosition);
 }
 
-export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }: GalaxyProps) {
+export function Galaxy({
+  jokes, selectedId, highlightedIds, searchText, submittedQuery, isSearching,
+  onSearchTextChange, onSearch, onSelect, onHover,
+}: GalaxyProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const selectedInfoRef = useRef<HTMLDivElement>(null);
   const selectedIdRef = useRef(selectedId);
+  const highlightedIdsRef = useRef(highlightedIds);
   const callbacksRef = useRef({ onSelect, onHover });
   const selectedJoke = selectedId ? jokes.find((joke) => joke.id === selectedId) : undefined;
+  const visibleSearchCount = highlightedIds
+    ? jokes.slice(0, 600).filter((joke) => highlightedIds.has(joke.id)).length
+    : 0;
   const [isReady, setIsReady] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [fullscreenSupported, setFullscreenSupported] = useState(false);
   selectedIdRef.current = selectedId;
+  highlightedIdsRef.current = highlightedIds;
   callbacksRef.current = { onSelect, onHover };
 
   useEffect(() => {
@@ -130,15 +143,17 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
     const layoutPositions = projectGalaxyPositions(jokes);
     const visibleJokes = jokes.slice(0, 600);
     visibleJokes.forEach((joke, index) => {
-      const isHighlighted = !highlightedIds?.size || highlightedIds.has(joke.id);
+      const currentHighlights = highlightedIdsRef.current;
+      const isHighlighted = !currentHighlights || currentHighlights.has(joke.id);
       const material = new THREE.MeshBasicMaterial({ color: joke.cluster.color, transparent: true, opacity: isHighlighted ? 0.96 : 0.19 });
       const point = new THREE.Mesh(pointGeometry, material);
       const [x, y, z] = layoutPositions[index];
-      const defaultScale = highlightedIds?.has(joke.id) ? 1.24 : 0.88 + (index % 4) * 0.07;
+      const baseScale = 0.88 + (index % 4) * 0.07;
+      const pointScale = currentHighlights?.has(joke.id) ? 1.24 : baseScale;
       point.position.set(x, y, z);
-      point.scale.setScalar(joke.id === selectedIdRef.current ? 1.55 : defaultScale);
+      point.scale.setScalar(joke.id === selectedIdRef.current ? 1.55 : pointScale);
       point.userData.jokeId = joke.id;
-      point.userData.defaultScale = defaultScale;
+      point.userData.defaultScale = baseScale;
       cloud.add(point);
       pointMeshes.push(point);
       jokeForMesh.set(point, joke);
@@ -172,6 +187,7 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
     cloud.add(halo);
     const projectedSelectedPosition = new THREE.Vector3();
     let activeSelectedId = selectedIdRef.current;
+    let activeHighlightedIds = highlightedIdsRef.current;
     let lastSelectedAnchor = { x: 0, y: 0 };
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -238,7 +254,7 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       setFromEvent(event);
       const hit = raycaster.intersectObjects(pointMeshes, false)[0];
       const joke = hit ? jokeForMesh.get(hit.object) : undefined;
-      if (joke) callbacksRef.current.onSelect(joke);
+      callbacksRef.current.onSelect(joke ?? null);
     };
     const handleWheel = (event: WheelEvent) => {
       event.preventDefault();
@@ -263,12 +279,26 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       stars.rotation.y -= 0.000035;
 
       const currentSelectedId = selectedIdRef.current;
+      const currentHighlightedIds = highlightedIdsRef.current;
       if (currentSelectedId !== activeSelectedId) {
         const previousMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === activeSelectedId);
-        previousMesh?.scale.setScalar(previousMesh.userData.defaultScale ?? 1);
+        if (previousMesh) {
+          const wasSearchMatch = currentHighlightedIds?.has(previousMesh.userData.jokeId);
+          previousMesh.scale.setScalar(wasSearchMatch ? 1.24 : previousMesh.userData.defaultScale ?? 1);
+        }
         const nextMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === currentSelectedId);
         nextMesh?.scale.setScalar(1.55);
         activeSelectedId = currentSelectedId;
+      }
+      if (currentHighlightedIds !== activeHighlightedIds) {
+        pointMeshes.forEach((mesh) => {
+          const jokeId = mesh.userData.jokeId;
+          const isHighlighted = !currentHighlightedIds || currentHighlightedIds.has(jokeId);
+          const material = mesh.material as THREE.MeshBasicMaterial;
+          material.opacity = isHighlighted ? 0.96 : 0.19;
+          mesh.scale.setScalar(jokeId === currentSelectedId ? 1.55 : currentHighlightedIds?.has(jokeId) ? 1.24 : mesh.userData.defaultScale ?? 1);
+        });
+        activeHighlightedIds = currentHighlightedIds;
       }
       const selectedMesh = pointMeshes.find((mesh) => mesh.userData.jokeId === currentSelectedId);
       halo.visible = Boolean(selectedMesh);
@@ -296,7 +326,7 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
           const infoHeight = selectedInfo.offsetHeight;
           const gap = 14;
           const margin = 12;
-          const safeTop = document.fullscreenElement === mount ? 62 : 88;
+          const safeTop = document.fullscreenElement === mount ? (width <= 640 ? 154 : 106) : 88;
           const safeBottom = 44;
           const canPlaceRight = lastSelectedAnchor.x + gap + infoWidth <= width - margin;
           const canPlaceLeft = lastSelectedAnchor.x - gap - infoWidth >= margin;
@@ -358,7 +388,7 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       renderer.domElement.remove();
       setIsReady(false);
     };
-  }, [jokes, highlightedIds]);
+  }, [jokes]);
 
   return <div className={`galaxy-viewport ${isReady ? 'is-ready' : ''}`} ref={mountRef}>
     {!isReady && <div className="galaxy-fallback" aria-hidden="true"><span className="fallback-orbit orbit-one" /><span className="fallback-orbit orbit-two" /><span className="fallback-core" /></div>}
@@ -388,6 +418,37 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
       {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
       <span>{isFullscreen ? 'Выйти из полного экрана' : 'На весь экран'}</span>
     </button>}
+    {isFullscreen && <form
+      className="galaxy-fullscreen-search"
+      onSubmit={(event) => { event.preventDefault(); onSearch(searchText); }}
+    >
+      <Search size={16} className="galaxy-fullscreen-search-icon" aria-hidden="true" />
+      <input
+        type="text"
+        value={searchText}
+        onChange={(event) => onSearchTextChange(event.target.value)}
+        placeholder="Найти шутку на карте"
+        aria-label="Поиск шуток на полноэкранной карте"
+        autoComplete="off"
+      />
+      {(searchText || submittedQuery) && <button
+        type="button"
+        className="galaxy-fullscreen-search-clear"
+        onClick={() => { onSearchTextChange(''); onSearch(''); }}
+        aria-label="Очистить поиск и подсветку"
+        title="Очистить поиск"
+      ><X size={14} /></button>}
+      <button type="submit" className="galaxy-fullscreen-search-submit" aria-label="Искать на карте" title="Искать на карте">
+        {isSearching ? <LoaderCircle size={16} className="spin" /> : <ArrowRight size={16} />}
+      </button>
+    </form>}
+    {isFullscreen && (submittedQuery || isSearching) && <div className="galaxy-fullscreen-search-status" role="status" aria-live="polite">
+      {isSearching
+        ? <><LoaderCircle size={12} className="spin" /> Ищем «{searchText.trim() || submittedQuery}»…</>
+        : visibleSearchCount
+          ? <>Подсвечено {visibleSearchCount} точек · «{submittedQuery}»</>
+          : <>На карте нет совпадений · «{submittedQuery}»</>}
+    </div>}
     <div className="galaxy-instructions"><span className="mouse-glyph">✣</span> Перетаскивайте · колесо — масштаб</div>
   </div>;
 }
