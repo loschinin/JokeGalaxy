@@ -167,11 +167,14 @@ func (s *Server) handleCreateJoke(w http.ResponseWriter, r *http.Request) {
 	cluster, exists := s.clusters[input.Cluster]
 	if !exists { cluster = s.clusters[fallbackCluster(input.Text)] }
 	if cluster.Slug == "" { cluster = s.clusters["puns"] }
-	vector, err := s.ai.Embed(r.Context(), "Темы: "+strings.Join(input.Triggers, ", ")+". "+input.Text, false)
-	if err != nil { vector = hashEmbedding("Темы: " + strings.Join(input.Triggers, ", ") + ". " + input.Text) }
-	position := s.placeCoordinates(vector)
+	document := embeddingText(input.Text, input.Triggers)
+	vector, err := s.ai.Embed(r.Context(), document, false)
+	embedding := semanticEmbeddingBytes(vector, err)
+	if embedding == nil { vector = hashEmbedding(document) }
+	position := [3]float64{}
+	if embedding != nil { position = s.placeCoordinates(vector) }
 	duplicate := s.isNearDuplicate(vector)
-	joke := Joke{Text: input.Text, Triggers: input.Triggers, Cluster: cluster, Author: Author{ID: strconv.FormatInt(user.ID, 10), Username: user.Username, AvatarURL: user.AvatarURL, Bio: user.Bio}, CreatedAt: time.Now(), PosX: position[0], PosY: position[1], PosZ: position[2], LikesCount: 0, FavoritesCount: 0, IsDuplicate: duplicate, Embedding: embeddingBytes(vector), UserID: user.ID}
+	joke := Joke{Text: input.Text, Triggers: input.Triggers, Cluster: cluster, Author: Author{ID: strconv.FormatInt(user.ID, 10), Username: user.Username, AvatarURL: user.AvatarURL, Bio: user.Bio}, CreatedAt: time.Now(), PosX: position[0], PosY: position[1], PosZ: position[2], LikesCount: 0, FavoritesCount: 0, IsDuplicate: duplicate, Embedding: embedding, UserID: user.ID}
 	if s.db != nil {
 		var id int64
 		err := s.db.QueryRowContext(r.Context(), `INSERT INTO jokes (user_id,text,triggers,cluster,pos_x,pos_y,pos_z,embedding,is_duplicate) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,created_at`, user.ID, joke.Text, joke.Triggers, cluster.Slug, joke.PosX, joke.PosY, joke.PosZ, joke.Embedding, duplicate).Scan(&id, &joke.CreatedAt)
@@ -182,6 +185,7 @@ func (s *Server) handleCreateJoke(w http.ResponseWriter, r *http.Request) {
 		joke.ID = strconv.FormatInt(id, 10)
 	}
 	s.cacheJoke(joke)
+	s.initializePCABasis()
 	writeJSON(w, http.StatusCreated, joke)
 }
 

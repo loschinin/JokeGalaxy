@@ -6,6 +6,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -74,6 +75,8 @@ func (s *Server) processCSVImport(ctx context.Context, jobID string, user User, 
 	ticker := time.NewTicker(time.Second / importRate)
 	defer ticker.Stop()
 	failureCount := 0
+	embeddingFailureCount := 0
+	firstEmbeddingError := ""
 	importErrors := make([]string, 0, 5)
 	for index, item := range items {
 		<-ticker.C
@@ -88,11 +91,25 @@ func (s *Server) processCSVImport(ctx context.Context, jobID string, user User, 
 		cluster, ok := s.clusters[clusterSlug]
 		if !ok { cluster = s.clusters["puns"] }
 		if len(triggers) == 0 { triggers = fallbackTriggers(item.text) }
-		vector, err := s.ai.Embed(ctx, "Темы: "+strings.Join(triggers, ", ")+". "+item.text, false)
-		if err != nil { vector = hashEmbedding("Темы: " + strings.Join(triggers, ", ") + ". " + item.text) }
-		position := s.placeCoordinates(vector)
+		document := embeddingText(item.text, triggers)
+		vector, err := s.ai.Embed(ctx, document, false)
+		embedding := semanticEmbeddingBytes(vector, err)
+		if embedding == nil {
+			embeddingFailureCount++
+			if err != nil {
+				log.Printf("CSV import %s row %d: Yandex embedding failed; using hashEmbedding fallback: %v", jobID, index+1, err)
+				if firstEmbeddingError == "" { firstEmbeddingError = err.Error() }
+			} else {
+				const invalidEmbeddingWarning = "Yandex returned an empty or invalid embedding"
+				log.Printf("CSV import %s row %d: %s; using hashEmbedding fallback", jobID, index+1, invalidEmbeddingWarning)
+				if firstEmbeddingError == "" { firstEmbeddingError = invalidEmbeddingWarning }
+			}
+			vector = hashEmbedding(document)
+		}
+		position := [3]float64{}
+		if embedding != nil { position = s.placeCoordinates(vector) }
 		duplicate := s.isNearDuplicate(vector)
-		joke, saveErr := s.importJoke(ctx, user, item.text, triggers, cluster, vector, position, duplicate)
+		joke, saveErr := s.importJoke(ctx, user, item.text, triggers, cluster, embedding, position, duplicate)
 		if saveErr != nil {
 			failureCount++
 			if len(importErrors) < cap(importErrors) { importErrors = append(importErrors, fmt.Sprintf("Строка %d: %v", index+1, saveErr)) }
@@ -109,6 +126,16 @@ func (s *Server) processCSVImport(ctx context.Context, jobID string, user User, 
 		if failureCount > len(importErrors) { statusMessage += fmt.Sprintf("; и ещё %d ошибок", failureCount-len(importErrors)) }
 		if failureCount == len(items) { finalStatus = "failed" }
 	}
+	if embeddingFailureCount > 0 {
+		log.Printf("CSV import %s: hashEmbedding fallback used for %d rows; first Yandex error: %s", jobID, embeddingFailureCount, firstEmbeddingError)
+		if statusMessage != "" { statusMessage += " " }
+		statusMessage += fmt.Sprintf("Внимание: для %d из %d строк использован hashEmbedding fallback вместо Yandex-вектора. Первая ошибка: %s.", embeddingFailureCount, len(items), firstEmbeddingError)
+	}
+	if _, err := s.recompute3DCoordinates(ctx); err != nil {
+		log.Printf("CSV import %s: 3D PCA recompute failed: %v", jobID, err)
+		if statusMessage != "" { statusMessage += " " }
+		statusMessage += fmt.Sprintf("Не удалось пересчитать координаты 3D-карты: %v", err)
+	}
 	s.setImportStatus(jobID, finalStatus, statusMessage)
 	if s.db != nil { _, _ = s.db.ExecContext(ctx, `UPDATE import_jobs SET status=$1, processed_rows=$2, error_text=$3, finished_at=NOW() WHERE id=$4`, finalStatus, len(items), statusMessage, parseID(jobID)) }
 }
@@ -121,8 +148,8 @@ func resolveClusterSlug(raw string, clusters []Cluster) string {
 	return ""
 }
 
-func (s *Server) importJoke(ctx context.Context, user User, text string, triggers []string, cluster Cluster, vector []float32, position [3]float64, duplicate bool) (Joke, error) {
-	joke := Joke{Text: text, Triggers: triggers, Cluster: cluster, Author: Author{ID: strconv.FormatInt(user.ID, 10), Username: user.Username, AvatarURL: user.AvatarURL}, UserID: user.ID, CreatedAt: time.Now(), PosX: position[0], PosY: position[1], PosZ: position[2], Embedding: embeddingBytes(vector), IsDuplicate: duplicate}
+func (s *Server) importJoke(ctx context.Context, user User, text string, triggers []string, cluster Cluster, embedding []byte, position [3]float64, duplicate bool) (Joke, error) {
+	joke := Joke{Text: text, Triggers: triggers, Cluster: cluster, Author: Author{ID: strconv.FormatInt(user.ID, 10), Username: user.Username, AvatarURL: user.AvatarURL}, UserID: user.ID, CreatedAt: time.Now(), PosX: position[0], PosY: position[1], PosZ: position[2], Embedding: embedding, IsDuplicate: duplicate}
 	if s.db != nil {
 		var id int64
 		if err := s.db.QueryRowContext(ctx, `INSERT INTO jokes (user_id,text,triggers,cluster,pos_x,pos_y,pos_z,embedding,is_duplicate) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id,created_at`, user.ID, text, triggers, cluster.Slug, position[0], position[1], position[2], joke.Embedding, duplicate).Scan(&id, &joke.CreatedAt); err != nil { return Joke{}, err }

@@ -35,6 +35,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("POST /api/admin/import-csv", s.handleCSVImport)
 	mux.HandleFunc("GET /api/admin/imports/{id}", s.handleImportStatus)
 	mux.HandleFunc("GET /api/admin/jokes", s.handleAdminJokes)
+	mux.HandleFunc("POST /api/admin/recompute-3d", s.handleAdminRecompute3D)
 	mux.HandleFunc("PATCH /api/admin/jokes/{id}", s.handleAdminUpdateJoke)
 	mux.HandleFunc("DELETE /api/admin/jokes/{id}", s.handleAdminDeleteJoke)
 	mux.HandleFunc("GET /api/admin/payments", s.handleAdminPayments)

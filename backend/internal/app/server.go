@@ -9,7 +9,6 @@ import (
 	"log"
 	"math"
 	"net/http"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -43,12 +42,17 @@ type Server struct {
 	ai *ai.Client
 	mux *http.ServeMux
 
-	// Embeddings and map coordinates deliberately live in RAM. All related maps
-	// share a read/write lock so vector search never needs per-row DB round trips.
+	// Embeddings, PCA basis, and map coordinates deliberately live in RAM. All
+	// related state is guarded by mu so projections and searches share snapshots.
 	mu sync.RWMutex
+	pcaMu sync.Mutex
 	jokes map[int64]Joke
 	vectors map[int64][]float32
 	coordinates map[int64][3]float64
+	pcaMean []float64
+	pcaComponents [3][]float64
+	pcaInitialized bool
+	pcaDataVersion uint64
 	clusters map[string]Cluster
 	users map[int64]User
 	yandexUsers map[string]int64
@@ -117,6 +121,13 @@ func New(config Config) (*Server, error) {
 				if err := server.loadDatabaseCache(); err != nil { log.Printf("database cache warning: %v", err) }
 			}
 		}
+	}
+	if server.needs3DRecompute() {
+		pcaCtx, cancelPCA := context.WithTimeout(context.Background(), 5*time.Minute)
+		if _, err := server.recompute3DCoordinates(pcaCtx); err != nil {
+			log.Printf("3D PCA startup recompute failed: %v", err)
+		}
+		cancelPCA()
 	}
 	server.mux = server.routes()
 	return server, nil
@@ -205,9 +216,19 @@ func (s *Server) loadDatabaseCache() error {
 	s.jokes = make(map[int64]Joke, len(loaded))
 	s.vectors = make(map[int64][]float32, len(loaded))
 	s.coordinates = make(map[int64][3]float64, len(loaded))
+	s.pcaMean = nil
+	s.pcaComponents = [3][]float64{}
+	s.pcaInitialized = false
+	s.pcaDataVersion++
 	for _, joke := range loaded {
 		id, _ := strconv.ParseInt(joke.ID, 10, 64)
-		if len(joke.Embedding) == embeddingDimensions*4 { s.vectors[id] = vectorFromBytes(joke.Embedding) } else { s.vectors[id] = hashEmbedding("Темы: " + strings.Join(joke.Triggers, ", ") + ". " + joke.Text) }
+		if vector, ok := storedSemanticVector(joke); ok {
+			s.vectors[id] = vector
+		} else {
+			// Older versions persisted hash vectors when Yandex embeddings failed.
+			// They are not semantic embeddings and must never enter vector ranking.
+			joke.Embedding = nil
+		}
 		s.coordinates[id] = [3]float64{joke.PosX, joke.PosY, joke.PosZ}
 		s.jokes[id] = joke
 		if id >= s.nextJokeID { s.nextJokeID = id + 1 }
@@ -271,46 +292,19 @@ func dot(left, right []float32) float64 {
 	return total
 }
 
-func (s *Server) placeCoordinates(vector []float32) [3]float64 {
-	type neighbor struct { score float64; point [3]float64 }
-	s.mu.RLock()
-	neighbors := make([]neighbor, 0, 5)
-	for id, cached := range s.vectors {
-		position, ok := s.coordinates[id]
-		if !ok { continue }
-		candidate := neighbor{score: dot(vector, cached), point: position}
-		neighbors = append(neighbors, candidate)
-	}
-	s.mu.RUnlock()
-	if len(neighbors) > 5 {
-		for i := 0; i < 5; i++ {
-			best := i
-			for j := i + 1; j < len(neighbors); j++ { if neighbors[j].score > neighbors[best].score { best = j } }
-			neighbors[i], neighbors[best] = neighbors[best], neighbors[i]
-		}
-		neighbors = neighbors[:5]
-	}
-	var point [3]float64
-	var weightSum float64
-	for _, item := range neighbors {
-		weight := math.Pow(math.Max(item.score, .04), 6)
-		for axis := range point { point[axis] += item.point[axis] * weight }
-		weightSum += weight
-	}
-	if weightSum > 0 { for axis := range point { point[axis] /= weightSum } }
-	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
-	for axis := range point { point[axis] += (rng.Float64() - .5) * .035 }
-	return point
-}
-
 func (s *Server) cacheJoke(joke Joke) {
 	id, _ := strconv.ParseInt(joke.ID, 10, 64)
-	vector := vectorFromBytes(joke.Embedding)
-	if vector == nil { vector = hashEmbedding("Темы: " + strings.Join(joke.Triggers, ", ") + ". " + joke.Text) }
+	vector, hasVector := storedSemanticVector(joke)
+	if !hasVector {
+		joke.Embedding = nil
+		joke.PosX, joke.PosY, joke.PosZ = 0, 0, 0
+	}
+	position := [3]float64{joke.PosX, joke.PosY, joke.PosZ}
 	s.mu.Lock()
 	s.jokes[id] = joke
-	s.vectors[id] = vector
-	s.coordinates[id] = [3]float64{joke.PosX, joke.PosY, joke.PosZ}
+	if hasVector { s.vectors[id] = vector } else { delete(s.vectors, id) }
+	s.coordinates[id] = position
+	s.pcaDataVersion++
 	if id >= s.nextJokeID { s.nextJokeID = id + 1 }
 	s.mu.Unlock()
 }
