@@ -186,6 +186,7 @@ func (s *Server) handleCreateJoke(w http.ResponseWriter, r *http.Request) {
 	}
 	s.cacheJoke(joke)
 	s.initializePCABasis()
+	s.startMissingEmbeddingReindex()
 	writeJSON(w, http.StatusCreated, joke)
 }
 

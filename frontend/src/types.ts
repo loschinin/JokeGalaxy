@@ -44,4 +44,5 @@ export interface JokeSearchResponse {
   results?: Joke[];
   query: string;
   mode: SearchMode;
+  semantic_fallback?: boolean;
 }

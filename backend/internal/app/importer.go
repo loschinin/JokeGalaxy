@@ -136,6 +136,7 @@ func (s *Server) processCSVImport(ctx context.Context, jobID string, user User, 
 		if statusMessage != "" { statusMessage += " " }
 		statusMessage += fmt.Sprintf("Не удалось пересчитать координаты 3D-карты: %v", err)
 	}
+	s.startMissingEmbeddingReindex()
 	s.setImportStatus(jobID, finalStatus, statusMessage)
 	if s.db != nil { _, _ = s.db.ExecContext(ctx, `UPDATE import_jobs SET status=$1, processed_rows=$2, error_text=$3, finished_at=NOW() WHERE id=$4`, finalStatus, len(items), statusMessage, parseID(jobID)) }
 }

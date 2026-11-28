@@ -53,11 +53,12 @@ type User struct {
 }
 
 type SearchResponse struct {
-	KeywordResults  []Joke `json:"keyword_results"`
-	SemanticResults []Joke `json:"semantic_results"`
-	Results         []Joke `json:"results"`
-	Query           string `json:"query"`
-	Mode            string `json:"mode"`
+	KeywordResults    []Joke `json:"keyword_results"`
+	SemanticResults   []Joke `json:"semantic_results"`
+	Results           []Joke `json:"results"`
+	Query             string `json:"query"`
+	Mode              string `json:"mode"`
+	SemanticFallback  bool   `json:"semantic_fallback,omitempty"`
 }
 
 type JokeInput struct {

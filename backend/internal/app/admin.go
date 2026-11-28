@@ -66,6 +66,7 @@ func (s *Server) handleAdminUpdateJoke(w http.ResponseWriter, r *http.Request) {
 	joke.ID=strconv.FormatInt(id,10)
 	s.cacheJoke(joke)
 	s.initializePCABasis()
+	s.startMissingEmbeddingReindex()
 	writeJSON(w,http.StatusOK,joke)
 }
 

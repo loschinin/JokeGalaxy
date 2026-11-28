@@ -61,6 +61,13 @@ type Server struct {
 	imports map[string]*ImportStatus
 	nextJokeID int64
 	nextUserID int64
+
+	reindexCtx context.Context
+	cancelReindex context.CancelFunc
+	reindexMu sync.Mutex
+	reindexWG sync.WaitGroup
+	reindexRunning bool
+	reindexClosed bool
 }
 
 func NewFromEnv() (*Server, error) {
@@ -91,9 +98,11 @@ func New(config Config) (*Server, error) {
 	if config.JWTSecret == "" { config.JWTSecret = "development-secret-change-before-deploy" }
 	if config.SiteURL == "" { config.SiteURL = "http://localhost:8080" }
 	if config.FrontendDist == "" { config.FrontendDist = "../frontend/dist" }
+	reindexCtx, cancelReindex := context.WithCancel(context.Background())
 	server := &Server{
 		cfg: config,
 		ai: ai.New(config.DeepSeekAPIKey, config.YandexAPIKey, config.YandexFolderID),
+		reindexCtx: reindexCtx, cancelReindex: cancelReindex,
 		jokes: make(map[int64]Joke), vectors: make(map[int64][]float32), coordinates: make(map[int64][3]float64),
 		clusters: make(map[string]Cluster), users: make(map[int64]User), yandexUsers: make(map[string]int64),
 		likes: make(map[Relation]bool), favorites: make(map[Relation]bool), imports: make(map[string]*ImportStatus),
@@ -129,11 +138,17 @@ func New(config Config) (*Server, error) {
 		}
 		cancelPCA()
 	}
+	server.startMissingEmbeddingReindex()
 	server.mux = server.routes()
 	return server, nil
 }
 
 func (s *Server) Close() {
+	s.reindexMu.Lock()
+	s.reindexClosed = true
+	if s.cancelReindex != nil { s.cancelReindex() }
+	s.reindexMu.Unlock()
+	s.reindexWG.Wait()
 	if s.db != nil { _ = s.db.Close() }
 }
 
@@ -237,6 +252,121 @@ func (s *Server) loadDatabaseCache() error {
 	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(max(id), 0) FROM users`).Scan(&maxUser)
 	if maxUser >= s.nextUserID { s.nextUserID = maxUser + 1 }
 	return nil
+}
+
+func (s *Server) hasEmbeddingConfig() bool {
+	return s.ai != nil && strings.TrimSpace(s.ai.YandexAPIKey) != "" && strings.TrimSpace(s.ai.YandexFolderID) != ""
+}
+
+func (s *Server) hasSemanticVector(id int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return isUsableEmbedding(s.vectors[id])
+}
+
+func (s *Server) hasMissingSemanticVectors() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for id, joke := range s.jokes {
+		if !joke.IsDuplicate && !isUsableEmbedding(s.vectors[id]) { return true }
+	}
+	return false
+}
+
+func (s *Server) nextJokeNeedingEmbedding(skip map[int64]bool) (Joke, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var selected Joke
+	var selectedID int64
+	found := false
+	for id, joke := range s.jokes {
+		if joke.IsDuplicate || skip[id] || isUsableEmbedding(s.vectors[id]) { continue }
+		if !found || id < selectedID { selected, selectedID, found = joke, id, true }
+	}
+	return selected, found
+}
+
+func (s *Server) startMissingEmbeddingReindex() {
+	if !s.hasEmbeddingConfig() || !s.hasMissingSemanticVectors() { return }
+	s.reindexMu.Lock()
+	if s.reindexClosed || s.reindexRunning {
+		s.reindexMu.Unlock()
+		return
+	}
+	s.reindexRunning = true
+	s.reindexWG.Add(1)
+	s.reindexMu.Unlock()
+	go func() {
+		defer s.reindexWG.Done()
+		defer func() { s.reindexMu.Lock(); s.reindexRunning = false; s.reindexMu.Unlock() }()
+		s.reindexMissingEmbeddings()
+	}()
+}
+
+func (s *Server) reindexMissingEmbeddings() {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	skipped := make(map[int64]bool)
+	processed := 0
+	for {
+		joke, ok := s.nextJokeNeedingEmbedding(skipped)
+		if !ok { return }
+		select {
+		case <-s.reindexCtx.Done(): return
+		case <-ticker.C:
+		}
+		ctx, cancel := context.WithTimeout(s.reindexCtx, 45*time.Second)
+		vector, err := s.ai.Embed(ctx, embeddingText(joke.Text, joke.Triggers), false)
+		cancel()
+		if err != nil || !isUsableEmbedding(vector) {
+			if err == nil { err = fmt.Errorf("embedding response was empty or invalid") }
+			log.Printf("semantic embedding backfill paused after %d records: %v", processed, err)
+			return
+		}
+		embedding := embeddingBytes(vector)
+		position := s.placeCoordinates(vector)
+		if s.db != nil {
+			// Only replace the vector and coordinates for the unchanged joke; never alter its text or delete the row.
+			result, err := s.db.ExecContext(s.reindexCtx, `UPDATE jokes SET embedding=$1,pos_x=$2,pos_y=$3,pos_z=$4 WHERE id=$5 AND text=$6 AND triggers=$7`, embedding, position[0], position[1], position[2], parseID(joke.ID), joke.Text, joke.Triggers)
+			if err != nil {
+				log.Printf("semantic embedding backfill paused after %d records: %v", processed, err)
+				return
+			}
+			updated, err := result.RowsAffected()
+			if err != nil {
+				log.Printf("semantic embedding backfill paused after %d records: %v", processed, err)
+				return
+			}
+			if updated == 0 {
+				skipped[parseID(joke.ID)] = true
+				continue
+			}
+		}
+		if !s.cacheReindexedEmbedding(joke, vector, embedding, position) { continue }
+		processed++
+		if processed%100 == 0 { log.Printf("semantic embedding backfill: %d records reindexed", processed) }
+	}
+}
+
+func (s *Server) cacheReindexedEmbedding(snapshot Joke, vector []float32, embedding []byte, position [3]float64) bool {
+	id := parseID(snapshot.ID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, ok := s.jokes[id]
+	if !ok || current.Text != snapshot.Text || !sameStrings(current.Triggers, snapshot.Triggers) { return false }
+	current.Embedding = embedding
+	current.PosX, current.PosY, current.PosZ = position[0], position[1], position[2]
+	s.jokes[id] = current
+	s.vectors[id] = append([]float32(nil), vector...)
+	s.coordinates[id] = position
+	s.pcaDataVersion++
+	return true
+}
+
+func sameStrings(left, right []string) bool {
+	if len(left) != len(right) { return false }
+	for index := range left { if left[index] != right[index] { return false } }
+	return true
 }
 
 func (s *Server) initializeClusters() {

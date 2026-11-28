@@ -39,6 +39,7 @@ export async function searchJokes(query: string, mode: SearchMode, source: Joke[
       results: [...result.keyword, ...result.semantic],
       query,
       mode,
+      semantic_fallback: false,
     };
   }
 }
