@@ -84,7 +84,7 @@ export function Galaxy({
   const highlightedIdsRef = useRef(highlightedIds);
   const callbacksRef = useRef({ onSelect, onHover });
   const visibleSearchCount = highlightedIds
-    ? jokes.slice(0, 600).filter((joke) => highlightedIds.has(joke.id)).length
+    ? jokes.filter((joke) => highlightedIds.has(joke.id)).length
     : 0;
   const [isReady, setIsReady] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -148,7 +148,7 @@ export function Galaxy({
     const pointMeshes: THREE.Mesh[] = [];
     const jokeForMesh = new Map<THREE.Object3D, Joke>();
     const layoutPositions = projectGalaxyPositions(jokes);
-    const visibleJokes = jokes.slice(0, 600);
+    const visibleJokes = jokes;
     visibleJokes.forEach((joke, index) => {
       const currentHighlights = highlightedIdsRef.current;
       const isHighlighted = !currentHighlights || currentHighlights.has(joke.id);
