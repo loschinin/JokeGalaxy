@@ -17,6 +17,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /api/clusters", s.handleClusters)
 	mux.HandleFunc("GET /api/triggers", s.handlePopularTriggers)
 	mux.HandleFunc("GET /api/jokes", s.handleListJokes)
+	mux.HandleFunc("GET /api/map/jokes", s.handleListMapJokes)
 	mux.HandleFunc("GET /api/jokes/{id}", s.handleGetJoke)
 	mux.HandleFunc("POST /api/jokes/analyze", s.handleAnalyzeJoke)
 	mux.HandleFunc("POST /api/jokes", s.handleCreateJoke)

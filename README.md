@@ -88,4 +88,5 @@ id;text;triggers;cluster
 - `/favorites`, `/user/me`, `/admin` — избранное, профиль и панель редакции.
 - `/joke/{id}`, `/cluster/{slug}`, `/tag/{tag}`, `/user/{id}` — SSR-страницы с canonical, Open Graph и schema.org.
 - `/api/search?q=...&mode=hybrid|text|semantic` — поиск.
+- `/api/map/jokes?page=...&limit=50` — все шутки для карты, включая помеченные возможными дублями; публичная лента по-прежнему исключает их.
 - `/healthz` — состояние HTTP-сервера и PostgreSQL.

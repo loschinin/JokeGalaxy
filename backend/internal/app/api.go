@@ -18,6 +18,15 @@ func (s *Server) handleClusters(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListJokes(w http.ResponseWriter, r *http.Request) {
+	s.handleJokesList(w, r, false)
+}
+
+func (s *Server) handleListMapJokes(w http.ResponseWriter, r *http.Request) {
+	// The map includes records marked as duplicates; the public feed still hides them.
+	s.handleJokesList(w, r, true)
+}
+
+func (s *Server) handleJokesList(w http.ResponseWriter, r *http.Request, includeDuplicates bool) {
 	query := r.URL.Query()
 	page, _ := strconv.Atoi(query.Get("page"))
 	limit, _ := strconv.Atoi(query.Get("limit"))
@@ -26,7 +35,7 @@ func (s *Server) handleListJokes(w http.ResponseWriter, r *http.Request) {
 	author := query.Get("author")
 	favoritesOnly := query.Get("favorites") == "true" || query.Get("only_favorites") == "true"
 	userID := s.currentUserID(r)
-	items, hasMore := s.listJokes(r.Context(), page, limit, cluster, trigger, author, query.Get("sort"), favoritesOnly, userID)
+	items, hasMore := s.listJokes(r.Context(), page, limit, cluster, trigger, author, query.Get("sort"), favoritesOnly, userID, includeDuplicates)
 	if userID > 0 {
 		for index := range items {
 			id := parseID(items[index].ID)
