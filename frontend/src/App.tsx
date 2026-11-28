@@ -269,7 +269,7 @@ function App() {
       let currentPage = 1;
       try {
         while (true) {
-          const response = await fetch(`/api/jokes?page=${currentPage}&limit=50`, { signal: controller.signal });
+          const response = await fetch(`/api/map/jokes?page=${currentPage}&limit=50`, { signal: controller.signal });
           if (!response.ok) throw new Error('Не удалось загрузить все шутки для карты.');
           const payload = await response.json();
           if (!Array.isArray(payload?.jokes)) throw new Error('Сервер вернул некорректный список шуток.');

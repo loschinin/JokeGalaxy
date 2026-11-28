@@ -67,12 +67,13 @@ func (s *Server) queryJokes(ctx context.Context, query string, args ...any) ([]J
 	return result, rows.Err()
 }
 
-func (s *Server) listJokes(ctx context.Context, page, limit int, cluster, trigger, author string, sort string, favoritesOnly bool, userID int64) ([]Joke, bool) {
+func (s *Server) listJokes(ctx context.Context, page, limit int, cluster, trigger, author string, sort string, favoritesOnly bool, userID int64, includeDuplicates bool) ([]Joke, bool) {
 	if page < 1 { page = 1 }
 	if limit < 1 { limit = 12 }
 	if limit > 50 { limit = 50 }
 	if s.db != nil {
-		where := []string{"j.is_duplicate = FALSE"}
+		where := make([]string, 0, 5)
+		if !includeDuplicates { where = append(where, "j.is_duplicate = FALSE") }
 		args := make([]any, 0, 7)
 		if cluster != "" { args = append(args, cluster); where = append(where, fmt.Sprintf("j.cluster = $%d", len(args))) }
 		if trigger != "" { args = append(args, "%"+trigger+"%"); where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM unnest(j.triggers) tag WHERE tag ILIKE $%d)", len(args))) }
@@ -83,15 +84,17 @@ func (s *Server) listJokes(ctx context.Context, page, limit int, cluster, trigge
 			where = append(where, fmt.Sprintf("EXISTS (SELECT 1 FROM joke_favorites jf WHERE jf.joke_id = j.id AND jf.user_id = $%d)", len(args)))
 		}
 		order := map[string]string{
-			"newest": "j.created_at DESC", "oldest": "j.created_at ASC", "most-liked": "j.likes_count DESC",
-			"least-liked": "j.likes_count ASC", "most-saved": "j.favorites_count DESC", "random": "random()",
+			"newest": "j.created_at DESC, j.id DESC", "oldest": "j.created_at ASC, j.id ASC", "most-liked": "j.likes_count DESC, j.id DESC",
+			"least-liked": "j.likes_count ASC, j.id DESC", "most-saved": "j.favorites_count DESC, j.id DESC", "random": "random()",
 		}[sort]
-		if order == "" { order = "j.created_at DESC" }
+		if order == "" { order = "j.created_at DESC, j.id DESC" }
 		args = append(args, limit+1)
 		limitParam := len(args)
 		args = append(args, (page-1)*limit)
 		offsetParam := len(args)
-		query := fmt.Sprintf("%s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d", jokeSelect, strings.Join(where, " AND "), order, limitParam, offsetParam)
+		whereClause := strings.Join(where, " AND ")
+		if whereClause == "" { whereClause = "TRUE" }
+		query := fmt.Sprintf("%s WHERE %s ORDER BY %s LIMIT $%d OFFSET $%d", jokeSelect, whereClause, order, limitParam, offsetParam)
 		items, err := s.queryJokes(ctx, query, args...)
 		if err == nil {
 			hasMore := len(items) > limit
@@ -99,7 +102,7 @@ func (s *Server) listJokes(ctx context.Context, page, limit int, cluster, trigge
 			return items, hasMore
 		}
 	}
-	items := s.memoryList(cluster, trigger, author, sort, favoritesOnly, userID)
+	items := s.memoryList(cluster, trigger, author, sort, favoritesOnly, userID, includeDuplicates)
 	start := (page - 1) * limit
 	if start >= len(items) { return []Joke{}, false }
 	end := start + limit
@@ -108,11 +111,11 @@ func (s *Server) listJokes(ctx context.Context, page, limit int, cluster, trigge
 	return items[start:end], hasMore
 }
 
-func (s *Server) memoryList(cluster, trigger, author, sort string, favoritesOnly bool, userID int64) []Joke {
+func (s *Server) memoryList(cluster, trigger, author, sort string, favoritesOnly bool, userID int64, includeDuplicates bool) []Joke {
 	s.mu.RLock()
 	items := make([]Joke, 0, len(s.jokes))
 	for id, joke := range s.jokes {
-		if joke.IsDuplicate { continue }
+		if joke.IsDuplicate && !includeDuplicates { continue }
 		if cluster != "" && joke.Cluster.Slug != cluster { continue }
 		if trigger != "" && !containsFold(joke.Triggers, trigger) { continue }
 		if author != "" && joke.Author.ID != author { continue }
@@ -133,13 +136,34 @@ func containsFold(values []string, query string) bool {
 }
 
 func sortJokes(items []Joke, mode string) {
-	less := func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) }
+	newestFirst := func(i, j int) bool {
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) { return items[i].CreatedAt.After(items[j].CreatedAt) }
+		return parseID(items[i].ID) > parseID(items[j].ID)
+	}
+	less := newestFirst
 	switch mode {
-	case "oldest": less = func(i, j int) bool { return items[i].CreatedAt.Before(items[j].CreatedAt) }
-	case "most-liked": less = func(i, j int) bool { return items[i].LikesCount > items[j].LikesCount }
-	case "least-liked": less = func(i, j int) bool { return items[i].LikesCount < items[j].LikesCount }
-	case "most-saved": less = func(i, j int) bool { return items[i].FavoritesCount > items[j].FavoritesCount }
-	case "random": less = func(i, j int) bool { return items[i].ID < items[j].ID }
+	case "oldest":
+		less = func(i, j int) bool {
+			if !items[i].CreatedAt.Equal(items[j].CreatedAt) { return items[i].CreatedAt.Before(items[j].CreatedAt) }
+			return parseID(items[i].ID) < parseID(items[j].ID)
+		}
+	case "most-liked":
+		less = func(i, j int) bool {
+			if items[i].LikesCount != items[j].LikesCount { return items[i].LikesCount > items[j].LikesCount }
+			return parseID(items[i].ID) > parseID(items[j].ID)
+		}
+	case "least-liked":
+		less = func(i, j int) bool {
+			if items[i].LikesCount != items[j].LikesCount { return items[i].LikesCount < items[j].LikesCount }
+			return parseID(items[i].ID) > parseID(items[j].ID)
+		}
+	case "most-saved":
+		less = func(i, j int) bool {
+			if items[i].FavoritesCount != items[j].FavoritesCount { return items[i].FavoritesCount > items[j].FavoritesCount }
+			return parseID(items[i].ID) > parseID(items[j].ID)
+		}
+	case "random":
+		less = func(i, j int) bool { return items[i].ID < items[j].ID }
 	}
 	for i := 0; i < len(items); i++ { for j := i + 1; j < len(items); j++ { if less(j, i) { items[i], items[j] = items[j], items[i] } } }
 }

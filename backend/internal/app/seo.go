@@ -92,7 +92,7 @@ func (s *Server) handleSSRCluster(w http.ResponseWriter, r *http.Request) {
 	for _, candidate := range s.clusterList() { if candidate.Slug == slug { cluster = candidate; break } }
 	if cluster.Slug == "" { http.NotFound(w, r); return }
 	page := queryPage(r)
-	items, hasMore := s.listJokes(r.Context(), page, 20, slug, "", "", "newest", false, 0)
+	items, hasMore := s.listJokes(r.Context(), page, 20, slug, "", "", "newest", false, 0, false)
 	next, previous := 0, 0
 	if hasMore { next = page + 1 }
 	if page > 1 { previous = page - 1 }
@@ -107,7 +107,7 @@ func (s *Server) handleSSRTag(w http.ResponseWriter, r *http.Request) {
 	tag := r.PathValue("tag")
 	if strings.TrimSpace(tag) == "" { http.NotFound(w, r); return }
 	page := queryPage(r)
-	items, hasMore := s.listJokes(r.Context(), page, 20, "", tag, "", "newest", false, 0)
+	items, hasMore := s.listJokes(r.Context(), page, 20, "", tag, "", "newest", false, 0, false)
 	next, previous := 0, 0
 	if hasMore { next = page + 1 }; if page > 1 { previous = page - 1 }
 	description := "Русские шутки по смысловому тегу «" + tag + "». Найдите каламбуры, истории и наблюдения на эту тему."
@@ -122,7 +122,7 @@ func (s *Server) handleSSRUser(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	user, ok := s.getPublicUser(r.Context(), id)
 	if !ok { http.NotFound(w, r); return }
-	items, _ := s.listJokes(r.Context(), 1, 100, "", "", id, "newest", false, 0)
+	items, _ := s.listJokes(r.Context(), 1, 100, "", "", id, "newest", false, 0, false)
 	likes := 0
 	for _, joke := range items { likes += joke.LikesCount }
 	joined := russianMonth(user.CreatedAt)
