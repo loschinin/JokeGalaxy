@@ -10,6 +10,64 @@ interface GalaxyProps {
   onHover?: (joke: Joke | null) => void;
 }
 
+type GalaxyPosition = [number, number, number];
+
+const MAP_RADIUS = 3.1;
+const MAX_MAP_COORDINATE = 3.45;
+
+function hashToUnit(value: string, salt: number): number {
+  let hash = (2166136261 ^ salt) >>> 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return hash / 0xffffffff;
+}
+
+function fallbackPosition(id: string): GalaxyPosition {
+  const latitude = Math.asin(2 * hashToUnit(id, 0) - 1);
+  const longitude = 2 * Math.PI * hashToUnit(id, 1);
+  const radius = MAP_RADIUS * 0.86;
+  const ring = Math.cos(latitude) * radius;
+  return [ring * Math.cos(longitude), Math.sin(latitude) * radius, ring * Math.sin(longitude)];
+}
+
+function quantile(sorted: number[], fraction: number): number {
+  const rank = (sorted.length - 1) * fraction;
+  const lower = Math.floor(rank);
+  const upper = Math.ceil(rank);
+  const weight = rank - lower;
+  return sorted[lower] * (1 - weight) + sorted[upper] * weight;
+}
+
+function projectGalaxyPositions(jokes: Joke[]): GalaxyPosition[] {
+  if (jokes.length === 0) return [];
+  if (jokes.length === 1) return [[0, 0, 0]];
+
+  const coordinates = jokes.map((joke, index) => {
+    const angle = index * 2.4;
+    return [
+      Number.isFinite(joke.posX) ? joke.posX : Math.cos(angle) * 0.5,
+      Number.isFinite(joke.posY) ? joke.posY : Math.sin(angle) * 0.4,
+      Number.isFinite(joke.posZ) ? joke.posZ : Math.cos(angle * 0.7) * 0.4,
+    ] as GalaxyPosition;
+  });
+  const axes = [0, 1, 2].map((axis) => coordinates.map((point) => point[axis]).sort((a, b) => a - b));
+  const lower = axes.map((axis) => quantile(axis, 0.02));
+  const upper = axes.map((axis) => quantile(axis, 0.98));
+  const center = lower.map((value, axis) => (value + upper[axis]) / 2);
+  const span = Math.max(...lower.map((value, axis) => upper[axis] - value));
+
+  if (!Number.isFinite(span) || span < 1e-5) {
+    return jokes.map((joke, index) => fallbackPosition(joke.id || String(index)));
+  }
+
+  const scale = (MAP_RADIUS * 2) / span;
+  return coordinates.map((point) => point.map((value, axis) => (
+    Math.max(-MAX_MAP_COORDINATE, Math.min(MAX_MAP_COORDINATE, (value - center[axis]) * scale))
+  )) as GalaxyPosition);
+}
+
 export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }: GalaxyProps) {
   const mountRef = useRef<HTMLDivElement>(null);
   const callbacksRef = useRef({ onSelect, onHover });
@@ -41,16 +99,14 @@ export function Galaxy({ jokes, selectedId, highlightedIds, onSelect, onHover }:
     const pointGeometry = new THREE.SphereGeometry(0.065, 12, 10);
     const pointMeshes: THREE.Mesh[] = [];
     const jokeForMesh = new Map<THREE.Object3D, Joke>();
+    const layoutPositions = projectGalaxyPositions(jokes);
     const visibleJokes = jokes.slice(0, 600);
     visibleJokes.forEach((joke, index) => {
       const isHighlighted = !highlightedIds?.size || highlightedIds.has(joke.id);
       const material = new THREE.MeshBasicMaterial({ color: joke.cluster.color, transparent: true, opacity: isHighlighted ? 0.96 : 0.19 });
       const point = new THREE.Mesh(pointGeometry, material);
-      const fallbackAngle = index * 2.4;
-      const x = Number.isFinite(joke.posX) ? joke.posX : Math.cos(fallbackAngle) * 0.5;
-      const y = Number.isFinite(joke.posY) ? joke.posY : Math.sin(fallbackAngle) * 0.4;
-      const z = Number.isFinite(joke.posZ) ? joke.posZ : Math.cos(fallbackAngle * 0.7) * 0.4;
-      point.position.set(x * 4.4, y * 4.0, z * 4.4);
+      const [x, y, z] = layoutPositions[index];
+      point.position.set(x, y, z);
       point.scale.setScalar(joke.id === selectedId ? 1.55 : highlightedIds?.has(joke.id) ? 1.24 : 0.88 + (index % 4) * 0.07);
       point.userData.jokeId = joke.id;
       cloud.add(point);
