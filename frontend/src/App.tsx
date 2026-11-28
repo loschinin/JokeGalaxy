@@ -493,7 +493,12 @@ function App() {
       case 'most-liked': list.sort((a, b) => b.likesCount - a.likesCount); break;
       case 'least-liked': list.sort((a, b) => a.likesCount - b.likesCount); break;
       case 'most-saved': list.sort((a, b) => b.favoritesCount - a.favoritesCount); break;
-      case 'random': list.sort((a, b) => (Number(a.id) * 47 % 23) - (Number(b.id) * 47 % 23)); break;
+      case 'random':
+        for (let index = list.length - 1; index > 0; index -= 1) {
+          const other = Math.floor(Math.random() * (index + 1));
+          [list[index], list[other]] = [list[other], list[index]];
+        }
+        break;
       default: list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
     return list;
@@ -717,6 +722,13 @@ function HomePage(props: {
   const keywordResults = (searchResponse?.keyword_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
   const semanticResults = (searchResponse?.semantic_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
   const activeClusterNames = clusters.filter((cluster) => clusterFilters.includes(cluster.slug)).map((cluster) => cluster.name);
+  const chooseRandomGalaxyJoke = () => {
+    if (!galaxyJokes.length) return;
+    const alternatives = galaxyJokes.length > 1
+      ? galaxyJokes.filter((joke) => joke.id !== selectedJoke?.id)
+      : galaxyJokes;
+    setSelectedJoke(alternatives[Math.floor(Math.random() * alternatives.length)]);
+  };
 
   useEffect(() => {
     const nextSelection = galaxyJokes[0] ?? null;
@@ -731,7 +743,7 @@ function HomePage(props: {
   return <>
     <section className="page-intro home-intro">
       <div className="eyebrow"><span className="eyebrow-line" /> ИНТЕРАКТИВНАЯ КОЛЛЕКЦИЯ <span className="eyebrow-spark">✦</span></div>
-      <div className="home-title-row"><div><h1>Найдите свою <span>шутку.</span></h1><p>Ищите не только по словам — ищите по ощущению.</p></div><button className="daily-note" onClick={() => allJokes.length ? setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)]) : onAdd()}><span className="daily-note-icon"><Sparkles size={16} /></span><span><b>{allJokes.length ? 'Есть минутка?' : 'Коллекция пуста'}</b><small>{allJokes.length ? 'Выбрать случайную шутку' : 'Опубликовать первую'}</small></span><ArrowUpRight size={15} /></button></div>
+      <div className="home-title-row"><div><h1>Найдите свою <span>шутку.</span></h1><p>Ищите не только по словам — ищите по ощущению.</p></div><button className="daily-note" onClick={() => { if (galaxyJokes.length) chooseRandomGalaxyJoke(); else if (allJokes.length) onClear(); else onAdd(); }}><span className="daily-note-icon"><Sparkles size={16} /></span><span><b>{galaxyJokes.length ? 'Есть минутка?' : allJokes.length ? 'Орбита пуста' : 'Коллекция пуста'}</b><small>{galaxyJokes.length ? 'Выбрать случайную шутку' : allJokes.length ? 'Сбросить фильтры' : 'Опубликовать первую'}</small></span><ArrowUpRight size={15} /></button></div>
     </section>
 
     <section className="search-section" aria-label="Поиск шуток">
@@ -783,7 +795,7 @@ function HomePage(props: {
 
     <section className="explore-grid">
       <div className="panel galaxy-panel">
-        <div className="panel-heading galaxy-heading"><div><div className="panel-title-line"><span className="orbit-mark"><span /></span><h2>Карта юмора</h2><span className="live-pill"><span />{allJokes.length ? 'В эфире' : 'Пока пусто'}</span></div><p>Каждая точка — шутка. Рядом те, что говорят на похожем языке.</p></div><button className="icon-button muted-icon-button" onClick={() => { if (allJokes.length) setSelectedJoke(allJokes[Math.floor(Math.random() * allJokes.length)]); }} disabled={!allJokes.length} aria-label="Случайная шутка"><Sparkles size={16} /></button></div>
+        <div className="panel-heading galaxy-heading"><div><div className="panel-title-line"><span className="orbit-mark"><span /></span><h2>Карта юмора</h2><span className="live-pill"><span />{allJokes.length ? 'В эфире' : 'Пока пусто'}</span></div><p>Каждая точка — шутка. Рядом те, что говорят на похожем языке.</p></div><button className="icon-button muted-icon-button" onClick={chooseRandomGalaxyJoke} disabled={!galaxyJokes.length} aria-label="Случайная шутка"><Sparkles size={16} /></button></div>
         <div className="galaxy-stage"><Suspense fallback={<div className="galaxy-loading">Загружаем трёхмерную карту…</div>}><Galaxy
           jokes={galaxyJokes}
           selectedId={selectedJoke?.id}
