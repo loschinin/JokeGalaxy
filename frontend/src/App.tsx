@@ -120,6 +120,7 @@ function App() {
   const [serverPage, setServerPage] = useState(1);
   const [serverHasMore, setServerHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [mapCollectionLoading, setMapCollectionLoading] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [submittedQuery, setSubmittedQuery] = useState('');
   const [searchMode, setSearchMode] = useState<SearchMode>('hybrid');
@@ -143,6 +144,7 @@ function App() {
   const [credits, setCredits] = useState(0);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const mapJokesLoadedRef = useRef(false);
 
   const showToast = useCallback((message: string) => setToastMessage(message), []);
   const refreshPopularTriggers = useCallback(async () => {
@@ -248,6 +250,56 @@ function App() {
       window.removeEventListener('beforeinstallprompt', handleInstall);
     };
   }, [readLocation, refreshPopularTriggers]);
+
+  useEffect(() => {
+    if (!backendAvailable || page !== 'home') return;
+    if (mapJokesLoadedRef.current) {
+      setServerHasMore(false);
+      return;
+    }
+    const controller = new AbortController();
+    let active = true;
+    setMapCollectionLoading(true);
+
+    const loadMapCollection = async () => {
+      const collection = new Map<string, Joke>();
+      let currentPage = 1;
+      try {
+        while (true) {
+          const response = await fetch(`/api/jokes?page=${currentPage}&limit=50`, { signal: controller.signal });
+          if (!response.ok) throw new Error('Не удалось загрузить все шутки для карты.');
+          const payload = await response.json();
+          if (!Array.isArray(payload?.jokes)) throw new Error('Сервер вернул некорректный список шуток.');
+          payload.jokes.forEach((joke: Joke) => collection.set(joke.id, joke));
+          if (!payload.has_more) break;
+          currentPage += 1;
+        }
+        if (!active) return;
+        mapJokesLoadedRef.current = true;
+        setAllJokes((current) => {
+          const merged = new Map(collection);
+          current.forEach((joke) => merged.set(joke.id, joke));
+          return [...merged.values()];
+        });
+        setServerHasMore(false);
+      } catch {
+        if (!active || !collection.size) return;
+        setAllJokes((current) => {
+          const merged = new Map(collection);
+          current.forEach((joke) => merged.set(joke.id, joke));
+          return [...merged.values()];
+        });
+      } finally {
+        if (active) setMapCollectionLoading(false);
+      }
+    };
+
+    void loadMapCollection();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [backendAvailable, page]);
 
   useEffect(() => {
     if (page !== 'profile') { setPublicProfile(null); return; }
@@ -399,7 +451,7 @@ function App() {
         result = await searchJokes(trimmed, mode, allJokes);
         if (!result.keyword_results?.length && !result.semantic_results?.length) {
           const local = rankLocally(trimmed, allJokes, mode);
-          result = { keyword_results: local.keyword, semantic_results: local.semantic, query: trimmed, mode };
+          result = { keyword_results: local.keyword, semantic_results: local.semantic, query: trimmed, mode, semantic_fallback: result.semantic_fallback };
         }
       } catch {
         const local = rankLocally(trimmed, allJokes, mode);
@@ -602,7 +654,7 @@ function App() {
 
         <div className="content-wrap">
           {page === 'home' && <HomePage
-            allJokes={allJokes} filteredJokes={filteredJokes} popularTriggers={popularTriggers} visibleCount={visibleCount} setVisibleCount={setVisibleCount}
+            allJokes={allJokes} mapCollectionLoading={mapCollectionLoading} filteredJokes={filteredJokes} popularTriggers={popularTriggers} visibleCount={visibleCount} setVisibleCount={setVisibleCount}
             selectedJoke={selectedJoke} setSelectedJoke={setSelectedJoke} hoveredJoke={hoveredJoke} setHoveredJoke={setHoveredJoke}
             searchText={searchText} setSearchText={setSearchText} searchInputRef={searchInputRef} submittedQuery={submittedQuery}
             searchMode={searchMode} setSearchMode={(mode) => { setSearchMode(mode); if (submittedQuery) void runSearch(submittedQuery, mode); }}
@@ -636,7 +688,7 @@ function App() {
 }
 
 function HomePage(props: {
-  allJokes: Joke[]; filteredJokes: Joke[]; popularTriggers: string[]; visibleCount: number; setVisibleCount: React.Dispatch<React.SetStateAction<number>>;
+  allJokes: Joke[]; mapCollectionLoading: boolean; filteredJokes: Joke[]; popularTriggers: string[]; visibleCount: number; setVisibleCount: React.Dispatch<React.SetStateAction<number>>;
   selectedJoke: Joke | null; setSelectedJoke: (joke: Joke | null) => void; hoveredJoke: Joke | null; setHoveredJoke: (joke: Joke | null) => void;
   searchText: string; setSearchText: (value: string) => void; searchInputRef: React.RefObject<HTMLInputElement>; submittedQuery: string;
   searchMode: SearchMode; setSearchMode: (mode: SearchMode) => void; searchResponse: JokeSearchResponse | null; allSearchResultIds: Set<string>;
@@ -649,7 +701,7 @@ function HomePage(props: {
   onClear: () => void;
 }) {
   const {
-    allJokes, filteredJokes, popularTriggers, visibleCount, setVisibleCount, selectedJoke, setSelectedJoke, hoveredJoke, setHoveredJoke,
+    allJokes, mapCollectionLoading, filteredJokes, popularTriggers, visibleCount, setVisibleCount, selectedJoke, setSelectedJoke, hoveredJoke, setHoveredJoke,
     searchText, setSearchText, searchInputRef, submittedQuery, searchMode, setSearchMode, searchResponse, allSearchResultIds,
     isSearching, runSearch, activeTriggers, clusterFilters, setClusterFilters, sortMode, setSortMode, onlyMine, setOnlyMine,
     showClusterMenu, setShowClusterMenu, sentinelRef, serverHasMore, loadingMore, onLoadMore,
@@ -700,10 +752,11 @@ function HomePage(props: {
     {submittedQuery && <section className="search-results-section" aria-live="polite">
       <div className="results-heading"><div><span className="section-kicker">РЕЗУЛЬТАТЫ ПОИСКА</span><h2>Для запроса <span className="query-highlight">«{submittedQuery}»</span></h2></div><button className="clear-results" onClick={onClear}><X size={14} /> Очистить поиск</button></div>
       <div className="results-meta"><span className="result-mode-pill"><Sparkles size={12} />{MODE_LABELS[searchMode]}</span><span>{(keywordResults.length + semanticResults.length).toLocaleString('ru-RU')} совпадений</span><span className="result-live-dot" />{isSearching ? 'Ищем в галактике…' : 'Релевантность учтена'}</div>
+      {searchResponse?.semantic_fallback && <div className="no-results-note"><Info size={15} />Смысловой сервис недоступен или часть векторов ещё не заполнена; выдача дополнена совпадениями по тексту и тегам.</div>}
       {!keywordResults.length && !semanticResults.length && !isSearching && <div className="no-results-note"><Info size={15} />{activeTriggers.length ? 'По выбранным тегам совпадений пока нет. Попробуйте снять часть фильтров или изменить запрос.' : allJokes.length ? 'Точных совпадений пока нет. Попробуйте изменить запрос.' : 'Коллекция пока пуста — добавьте первую шутку.'}</div>}
       {keywordResults.length > 0 && <div className="result-group"><div className="result-group-title"><span className="result-index">01</span><div><h3>Совпадения по словам</h3><p>Текст шутки и смысловые триггеры</p></div><span className="result-count">{keywordResults.length}</span></div><div className="result-card-grid">{keywordResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge">{Math.round((joke.relevance ?? 0.82) * 100)}% в тему</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {searchMode === 'hybrid' && <div className="semantic-divider"><span /><div><Compass size={14} /> Похожие по смыслу</div><span /></div>}
-      {semanticResults.length > 0 && <div className="result-group semantic-group"><div className="result-group-title"><span className="result-index semantic-index">{searchMode === 'semantic' ? '01' : '02'}</span><div><h3>{searchMode === 'semantic' ? 'По смыслу и ситуации' : 'Похожие по смыслу'}</h3><p>Нашли даже без общих слов</p></div><span className="result-count">{semanticResults.length}</span></div><div className="result-card-grid">{semanticResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge semantic-relevance">{Math.round((joke.relevance ?? 0.76) * 100)}% близко</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
+      {semanticResults.length > 0 && <div className="result-group semantic-group"><div className="result-group-title"><span className="result-index semantic-index">{searchMode === 'semantic' ? '01' : '02'}</span><div><h3>{searchResponse?.semantic_fallback ? 'Смысловой поиск с подстраховкой' : searchMode === 'semantic' ? 'По смыслу и ситуации' : 'Похожие по смыслу'}</h3><p>{searchResponse?.semantic_fallback ? 'Где вектор недоступен, помогают текст и теги' : 'Нашли даже без общих слов'}</p></div><span className="result-count">{semanticResults.length}</span></div><div className="result-card-grid">{semanticResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge semantic-relevance">{Math.round((joke.relevance ?? 0.76) * 100)}% близко</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {isSearching && <div className="search-loading"><LoaderCircle size={16} className="spin" /> Подбираем смысловые совпадения…</div>}
     </section>}
 
@@ -741,9 +794,9 @@ function HomePage(props: {
           onHover={setHoveredJoke}
         /></Suspense>
           {hoveredJoke && <div className="galaxy-hover-card"><span className="cluster-dot" style={{ background: hoveredJoke.cluster.color }} /><span>{hoveredJoke.text.replace(/\n/g, ' ').slice(0, 88)}{hoveredJoke.text.length > 88 ? '…' : ''}</span><ArrowUpRight size={14} /></div>}
-          <div className="galaxy-stat"><span className="galaxy-stat-number">{galaxyJokes.length.toLocaleString('ru-RU')}</span><span>точек в поле зрения</span></div>
+          <div className="galaxy-stat"><span className="galaxy-stat-number">{galaxyJokes.length.toLocaleString('ru-RU')}</span><span>{mapCollectionLoading ? 'загружаем коллекцию…' : 'точек на карте'}</span></div>
         </div>
-        <div className="galaxy-legend"><div className="legend-label">ТЕМЫ</div><div className="legend-items">{clusters.slice(0, 6).map((cluster) => <button key={cluster.slug} className={`legend-item ${clusterFilters.includes(cluster.slug) ? 'legend-item-muted' : ''}`} onClick={() => setClusterFilters((current) => current.includes(cluster.slug) ? current.filter((slug) => slug !== cluster.slug) : [...current, cluster.slug])}><span style={{ background: cluster.color }} />{cluster.name.split(/[, ]/)[0]}</button>)}</div><span className="legend-hint">нажмите, чтобы отфильтровать</span></div>
+        <div className="galaxy-legend"><div className="legend-label">КЛАСТЕРЫ</div><div className="legend-items">{clusters.slice(0, 6).map((cluster) => <button key={cluster.slug} className={`legend-item ${clusterFilters.includes(cluster.slug) ? 'legend-item-muted' : ''}`} onClick={() => setClusterFilters((current) => current.includes(cluster.slug) ? current.filter((slug) => slug !== cluster.slug) : [...current, cluster.slug])}><span style={{ background: cluster.color }} />{cluster.name.split(/[, ]/)[0]}</button>)}</div><span className="legend-hint">нажмите, чтобы отфильтровать</span></div>
         {searchResponse && <div className="map-search-note"><span className="map-search-pulse" />{allSearchResultIds.size} шуток подсвечены по запросу «{submittedQuery}»</div>}
       </div>
       {selectedJoke ? <aside className="panel featured-panel">

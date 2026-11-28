@@ -14,6 +14,16 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) (User, boo
 	return user, true
 }
 
+func (s *Server) handleAdminRecompute3D(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.requireAdmin(w, r); !ok { return }
+	count, err := s.recompute3DCoordinates(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "Не удалось пересчитать координаты 3D-карты."})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"reprojected": count, "scale": pcaCoordinateScale})
+}
+
 func (s *Server) handleAdminJokes(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireAdmin(w, r); !ok { return }
 	page, _ := strconv.Atoi(r.URL.Query().Get("page")); if page < 1 { page = 1 }
@@ -42,16 +52,21 @@ func (s *Server) handleAdminUpdateJoke(w http.ResponseWriter, r *http.Request) {
 	if input.Triggers!=nil { joke.Triggers=sanitizeTriggers(input.Triggers) }
 	if len(joke.Triggers)==0 { analysis:=s.analyze(r.Context(),joke.Text); joke.Triggers=analysis.Triggers }
 	if input.IsDuplicate!=nil { joke.IsDuplicate=*input.IsDuplicate }
-	vector,err:=s.ai.Embed(r.Context(),"Темы: "+strings.Join(joke.Triggers,", ")+". "+joke.Text,false)
-	if err!=nil { vector=hashEmbedding("Темы: "+strings.Join(joke.Triggers,", ")+". "+joke.Text) }
-	position:=s.placeCoordinates(vector)
-	joke.Embedding=embeddingBytes(vector); joke.PosX,joke.PosY,joke.PosZ=position[0],position[1],position[2]
+	document:=embeddingText(joke.Text,joke.Triggers)
+	vector,err:=s.ai.Embed(r.Context(),document,false)
+	embedding:=semanticEmbeddingBytes(vector,err)
+	if embedding==nil { vector=hashEmbedding(document) }
+	position:=[3]float64{}
+	if embedding!=nil { position=s.placeCoordinates(vector) }
+	joke.Embedding=embedding; joke.PosX,joke.PosY,joke.PosZ=position[0],position[1],position[2]
 	if s.db!=nil {
 		_,err=s.db.ExecContext(r.Context(),`UPDATE jokes SET text=$1,triggers=$2,cluster=$3,pos_x=$4,pos_y=$5,pos_z=$6,embedding=$7,is_duplicate=$8 WHERE id=$9`,joke.Text,joke.Triggers,joke.Cluster.Slug,joke.PosX,joke.PosY,joke.PosZ,joke.Embedding,joke.IsDuplicate,id)
 		if err!=nil { writeJSON(w,http.StatusInternalServerError,map[string]string{"error":"Не удалось сохранить изменения."}); return }
 	}
 	joke.ID=strconv.FormatInt(id,10)
 	s.cacheJoke(joke)
+	s.initializePCABasis()
+	s.startMissingEmbeddingReindex()
 	writeJSON(w,http.StatusOK,joke)
 }
 
@@ -63,7 +78,7 @@ func (s *Server) handleAdminDeleteJoke(w http.ResponseWriter,r *http.Request) {
 		if err!=nil { writeJSON(w,http.StatusInternalServerError,map[string]string{"error":"Не удалось удалить шутку."}); return }
 		count,_:=result.RowsAffected(); if count==0 { writeJSON(w,http.StatusNotFound,map[string]string{"error":"Шутка не найдена."}); return }
 	}
-	s.mu.Lock(); delete(s.jokes,id); delete(s.vectors,id); delete(s.coordinates,id)
+	s.mu.Lock(); delete(s.jokes,id); delete(s.vectors,id); delete(s.coordinates,id); s.pcaDataVersion++
 	for relation:=range s.likes { if relation.JokeID==id { delete(s.likes,relation) } }
 	for relation:=range s.favorites { if relation.JokeID==id { delete(s.favorites,relation) } }
 	s.mu.Unlock()

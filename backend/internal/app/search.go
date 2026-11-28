@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"math"
 	"sort"
 	"strings"
@@ -18,11 +20,68 @@ func (s *Server) search(ctx context.Context, query, mode string) SearchResponse 
 	if mode == "hybrid" || mode == "semantic" {
 		excluded := make(map[string]bool, len(response.KeywordResults))
 		for _, joke := range response.KeywordResults { excluded[joke.ID] = true }
-		response.SemanticResults = s.semanticSearch(ctx, query, excluded, 24)
+		semantic, err := s.semanticSearch(ctx, query, excluded, 24)
+		if err != nil {
+			log.Printf("semantic query embedding failed: %v", err)
+			response.SemanticFallback = true
+			if mode == "semantic" { response.SemanticResults = s.keywordSearch(ctx, query, 24) }
+			if s.hasMissingSemanticVectors() { s.startMissingEmbeddingReindex() }
+		} else {
+			response.SemanticResults = semantic
+			if mode == "semantic" {
+				lexical := s.keywordSearch(ctx, query, 24)
+				response.SemanticResults = mergeDirectMatches(query, response.SemanticResults, lexical, 24)
+			}
+			if s.hasMissingSemanticVectors() {
+				response.SemanticFallback = true
+				s.startMissingEmbeddingReindex()
+			}
+		}
 	}
 	response.Results = append(response.Results, response.KeywordResults...)
 	response.Results = append(response.Results, response.SemanticResults...)
 	return response
+}
+
+func mergeDirectMatches(query string, semantic, lexical []Joke, limit int) []Joke {
+	if limit <= 0 { return []Joke{} }
+	results := make([]Joke, 0, min(limit, len(semantic)+len(lexical)))
+	seen := make(map[string]bool, len(semantic)+len(lexical))
+	for _, joke := range lexical {
+		relevance, direct := directKeywordRelevance(query, joke)
+		if !direct || seen[joke.ID] { continue }
+		joke.Relevance = relevance
+		results = append(results, joke)
+		seen[joke.ID] = true
+		if len(results) == limit { break }
+	}
+	if len(results) < limit {
+		for _, joke := range semantic {
+			if seen[joke.ID] { continue }
+			results = append(results, joke)
+			seen[joke.ID] = true
+			if len(results) == limit { break }
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Relevance > results[j].Relevance })
+	return results
+}
+
+func directKeywordRelevance(query string, joke Joke) (float64, bool) {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" { return 0, false }
+	text := strings.ToLower(joke.Text)
+	if strings.Contains(text, query) { return 1, true }
+	for _, token := range words(query) {
+		if len([]rune(token)) < 2 { continue }
+		if strings.Contains(text, token) { return .99, true }
+		for _, trigger := range joke.Triggers {
+			trigger = strings.ToLower(strings.TrimSpace(trigger))
+			if trigger == "" { continue }
+			if trigger == token || strings.Contains(trigger, token) || strings.Contains(token, trigger) { return .98, true }
+		}
+	}
+	return 0, false
 }
 
 func normalizeMode(mode string) string {
@@ -108,18 +167,19 @@ func trigramSimilarity(left, right string) float64 {
 	return 2 * float64(intersection) / float64(denominator)
 }
 
-func (s *Server) semanticSearch(ctx context.Context, query string, excluded map[string]bool, limit int) []Joke {
+func (s *Server) semanticSearch(ctx context.Context, query string, excluded map[string]bool, limit int) ([]Joke, error) {
 	vectorContext, cancel := context.WithTimeout(ctx, 12*time.Second)
 	defer cancel()
 	vector, err := s.ai.Embed(vectorContext, query, true)
-	if err != nil { vector = hashEmbedding(query) }
+	if err != nil { return nil, err }
+	if !isUsableEmbedding(vector) { return nil, fmt.Errorf("semantic query embedding is empty or invalid") }
 
 	type result struct { joke Joke; score float64 }
 	s.mu.RLock()
-	matches := make([]result, 0, len(s.jokes))
+	matches := make([]result, 0, len(s.vectors))
 	for id, candidateVector := range s.vectors {
 		joke, ok := s.jokes[id]
-		if !ok || joke.IsDuplicate || excluded[joke.ID] { continue }
+		if !ok || joke.IsDuplicate || excluded[joke.ID] || !isUsableEmbedding(candidateVector) { continue }
 		score := dot(vector, candidateVector)
 		matches = append(matches, result{joke: joke, score: score})
 	}
@@ -131,7 +191,7 @@ func (s *Server) semanticSearch(ctx context.Context, query string, excluded map[
 		match.joke.Relevance = math.Max(0, math.Min(1, (match.score+1)/2))
 		out = append(out, match.joke)
 	}
-	return out
+	return out, nil
 }
 
 func (s *Server) nearestJokes(vector []float32, limit int, excludeID string) []Joke {
