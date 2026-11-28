@@ -189,7 +189,7 @@ a { color: inherit; text-decoration: none; }
 .all-tags-link { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; border: 0; color: #7f849e; background: transparent; font-size: 9px; cursor: pointer; }
 .all-tags-link:hover { color: var(--gold); }
 .filter-panel { display: flex; align-items: center; justify-content: space-between; min-height: 41px; margin-bottom: 15px; padding: 0 10px; border: 1px solid var(--line); border-radius: 9px; background: rgba(16,19,35,.63); }
-.filter-left { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.filter-left { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; min-width: 0; }
 .filter-button { display: flex; align-items: center; gap: 7px; min-height: 28px; padding: 0 9px; color: #9397b0; border: 1px solid transparent; border-radius: 6px; background: transparent; font-size: 9px; cursor: pointer; white-space: nowrap; }
 .filter-button:hover, .filter-button-on { color: #f3d695; border-color: rgba(243,207,130,.16); background: rgba(243,207,130,.06); }
 .filter-button-icon { width: 13px; height: 15px; display: inline-flex; align-items: center; }

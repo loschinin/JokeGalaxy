@@ -24,6 +24,14 @@ const SORT_LABELS: Record<SortMode, string> = {
   'most-saved': 'Чаще в избранном',
   random: 'Случайный порядок',
 };
+
+const normalizeTrigger = (trigger: string) => trigger.trim().toLocaleLowerCase('ru');
+const matchesSelectedTriggers = (joke: Pick<Joke, 'triggers'>, selectedTriggers: string[]) => {
+  if (!selectedTriggers.length) return true;
+  const selected = new Set(selectedTriggers.map(normalizeTrigger));
+  return joke.triggers.some((trigger) => selected.has(normalizeTrigger(trigger)));
+};
+
 const STYLE_PRESETS = [
   { id: 'custom', title: 'Свой стиль', subtitle: 'Ваш голос, точная структура', initials: 'ВЫ', color: '#f7cf83', description: 'Сохраняет вашу манеру речи, помогает выстроить сетап и панчлайн.' },
   { id: 'carlin', title: 'Джордж Карлин', subtitle: 'Острая социальная сатира', initials: 'К', color: '#b28cff', description: 'Абсурд правил и слов, точные наблюдения, нарастающий ритм.' },
@@ -119,7 +127,7 @@ function App() {
   const [isSearching, setIsSearching] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>('newest');
   const [clusterFilters, setClusterFilters] = useState<string[]>([]);
-  const [activeTrigger, setActiveTrigger] = useState('');
+  const [activeTriggers, setActiveTriggers] = useState<string[]>([]);
   const [showClusterMenu, setShowClusterMenu] = useState(false);
   const [onlyMine, setOnlyMine] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
@@ -149,14 +157,24 @@ function App() {
   const readLocation = useCallback(() => {
     const path = window.location.pathname;
     const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
+    const queryTags = new URLSearchParams(window.location.search).getAll('tag');
+    const routeTag = parts[0] === 'tag' ? parts[1] : '';
     if (parts[0] === 'joke' && parts[1]) { setPage('detail'); setDetailId(parts[1]); return; }
     if (parts[0] === 'user' && parts[1]) { setPage('profile'); setProfileId(parts[1]); return; }
     if (parts[0] === 'admin') { setPage('admin'); return; }
     if (parts[0] === 'standup') { setPage('standup'); return; }
     if (parts[0] === 'favorites') { setPage('favorites'); return; }
-    if (parts[0] === 'cluster' && parts[1]) { setPage('home'); setClusterFilters([parts[1]]); setActiveTrigger(''); return; }
-    if (parts[0] === 'tag' && parts[1]) { setPage('home'); setActiveTrigger(parts[1]); setClusterFilters([]); return; }
+    if (parts[0] === 'cluster' && parts[1]) { setPage('home'); setClusterFilters([parts[1]]); setActiveTriggers([]); return; }
+    if (routeTag || queryTags.length) {
+      const routeTags = queryTags.length ? queryTags : routeTag ? [routeTag] : [];
+      const uniqueTags = [...new Map(routeTags.map((tag) => [normalizeTrigger(tag), tag])).values()];
+      setPage('home');
+      setActiveTriggers(uniqueTags);
+      setClusterFilters([]);
+      return;
+    }
     setPage('home');
+    if (!parts.length) { setActiveTriggers([]); setClusterFilters([]); }
   }, []);
 
   const navigate = useCallback((path: string) => {
@@ -271,25 +289,30 @@ function App() {
 
   useEffect(() => {
     if (!backendAvailable || page !== 'home') return;
-    const params = new URLSearchParams({ page: '1', limit: '50' });
-    let hasFilter = false;
-    if (clusterFilters.length === 1) { params.set('cluster', clusterFilters[0]); hasFilter = true; }
-    if (activeTrigger) { params.set('tag', activeTrigger); hasFilter = true; }
-    if (onlyMine && currentUser) { params.set('author', currentUser.id); hasFilter = true; }
+    const hasFilter = clusterFilters.length === 1 || activeTriggers.length > 0 || (onlyMine && Boolean(currentUser));
     if (!hasFilter) return;
     const controller = new AbortController();
-    fetch(`/api/jokes?${params}`, { signal: controller.signal }).then((response) => response.ok ? response.json() : null).then((payload) => {
-      if (!payload || !Array.isArray(payload.jokes)) return;
+    const tagFilters: Array<string | undefined> = activeTriggers.length ? activeTriggers : [undefined];
+    Promise.all(tagFilters.map(async (tag) => {
+      const params = new URLSearchParams({ page: '1', limit: '50' });
+      if (clusterFilters.length === 1) params.set('cluster', clusterFilters[0]);
+      if (tag) params.set('tag', tag);
+      if (onlyMine && currentUser) params.set('author', currentUser.id);
+      const response = await fetch(`/api/jokes?${params}`, { signal: controller.signal });
+      return response.ok ? response.json() : null;
+    })).then((payloads) => {
+      const validPayloads = payloads.filter((payload) => payload && Array.isArray(payload.jokes));
+      if (!validPayloads.length) return;
       setAllJokes((current) => {
         const merged = new Map(current.map((item) => [item.id, item]));
-        payload.jokes.forEach((item: Joke) => merged.set(item.id, item));
+        validPayloads.forEach((payload) => payload.jokes.forEach((item: Joke) => merged.set(item.id, item)));
         return [...merged.values()];
       });
-      setServerPage(payload.page ?? 1);
-      setServerHasMore(Boolean(payload.has_more));
+      setServerPage(1);
+      setServerHasMore(validPayloads.some((payload) => Boolean(payload.has_more)));
     }).catch(() => undefined);
     return () => controller.abort();
-  }, [backendAvailable, page, clusterFilters, activeTrigger, onlyMine, currentUser?.id]);
+  }, [backendAvailable, page, clusterFilters, activeTriggers, onlyMine, currentUser?.id]);
 
   useEffect(() => {
     if (page !== 'favorites' || !backendAvailable) return;
@@ -312,31 +335,35 @@ function App() {
     if (!serverHasMore || loadingMore) return;
     setLoadingMore(true);
     const nextPage = serverPage + 1;
-    const params = new URLSearchParams({ page: String(nextPage), limit: '50' });
-    if (page === 'home') {
-      if (clusterFilters.length === 1) params.set('cluster', clusterFilters[0]);
-      if (activeTrigger) params.set('tag', activeTrigger);
-      if (onlyMine && currentUser) params.set('author', currentUser.id);
-    } else if (page === 'favorites') {
-      params.set('favorites', 'true');
-    } else if (page === 'profile') {
-      const authorID = profileId === 'me' ? currentUser?.id : profileId;
-      if (authorID) params.set('author', authorID);
-    }
+    const tagFilters: Array<string | undefined> = page === 'home' && activeTriggers.length ? activeTriggers : [undefined];
     try {
-      const response = await fetch(`/api/jokes?${params}`);
-      if (!response.ok) throw new Error('Подгрузка недоступна');
-      const payload = await response.json();
-      const batch: Joke[] = Array.isArray(payload.jokes) ? payload.jokes : [];
+      const payloads = await Promise.all(tagFilters.map(async (tag) => {
+        const params = new URLSearchParams({ page: String(nextPage), limit: '50' });
+        if (page === 'home') {
+          if (clusterFilters.length === 1) params.set('cluster', clusterFilters[0]);
+          if (tag) params.set('tag', tag);
+          if (onlyMine && currentUser) params.set('author', currentUser.id);
+        } else if (page === 'favorites') {
+          params.set('favorites', 'true');
+        } else if (page === 'profile') {
+          const authorID = profileId === 'me' ? currentUser?.id : profileId;
+          if (authorID) params.set('author', authorID);
+        }
+        const response = await fetch(`/api/jokes?${params}`);
+        if (!response.ok) throw new Error('Подгрузка недоступна');
+        return response.json();
+      }));
+      const batch: Joke[] = payloads.flatMap((payload) => Array.isArray(payload.jokes) ? payload.jokes : []);
       setAllJokes((current) => {
-        const known = new Set(current.map((joke) => joke.id));
-        return [...current, ...batch.filter((joke) => !known.has(joke.id))];
+        const merged = new Map(current.map((joke) => [joke.id, joke]));
+        batch.forEach((joke) => merged.set(joke.id, joke));
+        return [...merged.values()];
       });
       setServerPage(nextPage);
-      setServerHasMore(Boolean(payload.has_more));
+      setServerHasMore(payloads.some((payload) => Boolean(payload.has_more)));
     } catch { setServerHasMore(false); }
     finally { setLoadingMore(false); }
-  }, [serverHasMore, loadingMore, serverPage, page, clusterFilters, activeTrigger, onlyMine, currentUser, profileId]);
+  }, [serverHasMore, loadingMore, serverPage, page, clusterFilters, activeTriggers, onlyMine, currentUser, profileId]);
 
   const finishOnboarding = () => {
     localStorage.setItem('jg-onboarding-complete', 'true');
@@ -379,29 +406,30 @@ function App() {
         result = { keyword_results: local.keyword, semantic_results: local.semantic, query: trimmed, mode };
       }
       setSearchResponse(result);
-      const matches = [...(result.keyword_results ?? []), ...(result.semantic_results ?? [])];
-      if (matches.length) {
+      const allMatches = [...(result.keyword_results ?? []), ...(result.semantic_results ?? [])];
+      if (allMatches.length) {
         setAllJokes((current) => {
           const merged = new Map(current.map((item) => [item.id, item]));
-          matches.forEach((item) => merged.set(item.id, item));
+          allMatches.forEach((item) => merged.set(item.id, item));
           return [...merged.values()];
         });
       }
+      const matches = allMatches.filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
       const first = matches[0];
       if (first) setSelectedJoke(first);
-      if (!first) showToast('Пока не нашли совпадений. Попробуйте переформулировать запрос.');
+      if (!first) showToast(activeTriggers.length ? 'По выбранным тегам совпадений пока нет. Попробуйте снять часть фильтров.' : 'Пока не нашли совпадений. Попробуйте переформулировать запрос.');
     } finally { setIsSearching(false); }
   };
 
   const allSearchResultIds = useMemo(() => new Set([
-    ...(searchResponse?.keyword_results ?? []).map((joke) => joke.id),
-    ...(searchResponse?.semantic_results ?? []).map((joke) => joke.id),
-  ]), [searchResponse]);
+    ...(searchResponse?.keyword_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers)).map((joke) => joke.id),
+    ...(searchResponse?.semantic_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers)).map((joke) => joke.id),
+  ]), [searchResponse, activeTriggers]);
 
   const filteredJokes = useMemo(() => {
     let list = [...allJokes];
     if (clusterFilters.length) list = list.filter((joke) => clusterFilters.includes(joke.cluster.slug));
-    if (activeTrigger) list = list.filter((joke) => joke.triggers.some((tag) => tag.toLocaleLowerCase('ru') === activeTrigger.toLocaleLowerCase('ru')));
+    list = list.filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
     if (onlyMine) list = currentUser ? list.filter((joke) => joke.author.id === currentUser.id) : [];
     if (page === 'favorites') list = list.filter((joke) => joke.favorited);
     if (page === 'profile' && profileId !== 'me') list = list.filter((joke) => joke.author.id === profileId);
@@ -414,9 +442,9 @@ function App() {
       default: list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
     }
     return list;
-  }, [allJokes, clusterFilters, activeTrigger, onlyMine, page, profileId, sortMode, currentUser]);
+  }, [allJokes, clusterFilters, activeTriggers, onlyMine, page, profileId, sortMode, currentUser]);
 
-  useEffect(() => { setVisibleCount(8); }, [page, clusterFilters, activeTrigger, onlyMine, sortMode, submittedQuery]);
+  useEffect(() => { setVisibleCount(8); }, [page, clusterFilters, activeTriggers, onlyMine, sortMode, submittedQuery]);
   useEffect(() => {
     if (page !== 'home' && page !== 'favorites' && page !== 'profile') return;
     const element = sentinelRef.current;
@@ -451,8 +479,21 @@ function App() {
   };
   const openProfile = (id: string) => navigate(`/user/${encodeURIComponent(id)}`);
   const openTag = (value: string) => {
-    if (value.startsWith('cluster:')) navigate(`/cluster/${value.slice('cluster:'.length)}`);
-    else navigate(`/tag/${encodeURIComponent(value)}`);
+    if (value.startsWith('cluster:')) { navigate(`/cluster/${value.slice('cluster:'.length)}`); return; }
+    const alreadySelected = activeTriggers.some((trigger) => normalizeTrigger(trigger) === normalizeTrigger(value));
+    const nextTriggers = alreadySelected
+      ? activeTriggers.filter((trigger) => normalizeTrigger(trigger) !== normalizeTrigger(value))
+      : [...activeTriggers, value];
+    const params = new URLSearchParams();
+    nextTriggers.forEach((trigger) => params.append('tag', trigger));
+    const query = params.toString();
+    const path = nextTriggers.length ? `/tag/${encodeURIComponent(nextTriggers[0])}` : '/';
+    window.history.pushState({}, '', `${path}${query ? `?${query}` : ''}`);
+    setActiveTriggers(nextTriggers);
+    setClusterFilters([]);
+    setPage('home');
+    setShowMobileMenu(false);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
   const shareJoke = async (id: string) => {
     const url = `${window.location.origin}/joke/${encodeURIComponent(id)}`;
@@ -566,13 +607,13 @@ function App() {
             searchText={searchText} setSearchText={setSearchText} searchInputRef={searchInputRef} submittedQuery={submittedQuery}
             searchMode={searchMode} setSearchMode={(mode) => { setSearchMode(mode); if (submittedQuery) void runSearch(submittedQuery, mode); }}
             searchResponse={searchResponse} allSearchResultIds={allSearchResultIds} isSearching={isSearching} runSearch={runSearch}
-            activeTrigger={activeTrigger} clusterFilters={clusterFilters} setClusterFilters={setClusterFilters}
+            activeTriggers={activeTriggers} clusterFilters={clusterFilters} setClusterFilters={setClusterFilters}
             sortMode={sortMode} setSortMode={setSortMode} onlyMine={onlyMine} setOnlyMine={setOnlyMine}
             showClusterMenu={showClusterMenu} setShowClusterMenu={setShowClusterMenu} sentinelRef={sentinelRef}
             serverHasMore={serverHasMore} loadingMore={loadingMore} onLoadMore={loadMoreServer}
             onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke}
             onVoice={() => startVoice((value) => { setSearchText(value); searchInputRef.current?.focus(); })}
-            onAdd={() => setShowAddModal(true)} onClear={() => { setSubmittedQuery(''); setSearchResponse(null); setSearchText(''); setActiveTrigger(''); setClusterFilters([]); }}
+            onAdd={() => setShowAddModal(true)} onClear={() => { setSubmittedQuery(''); setSearchResponse(null); setSearchText(''); setActiveTriggers([]); setClusterFilters([]); window.history.pushState({}, '', '/'); }}
           />}
           {page === 'standup' && <StandupPage credits={credits} setCredits={setCredits} jokes={allJokes} showToast={showToast} backendAvailable={backendAvailable} authenticated={Boolean(currentUser)} onTopUp={() => setShowCreditsModal(true)} onVoice={(setter, current) => startVoice(setter, current)} />}
           {page === 'favorites' && <FavoritesPage jokes={filteredJokes} onLike={toggleLike} onFavorite={toggleFavorite} onTag={openTag} onProfile={openProfile} onOpen={openJoke} onShare={shareJoke} onExplore={() => navigate('/')} authRequired={backendAvailable && !currentUser} hasMore={serverHasMore} loadingMore={loadingMore} onLoadMore={loadMoreServer} />}
@@ -599,7 +640,7 @@ function HomePage(props: {
   selectedJoke: Joke | null; setSelectedJoke: (joke: Joke | null) => void; hoveredJoke: Joke | null; setHoveredJoke: (joke: Joke | null) => void;
   searchText: string; setSearchText: (value: string) => void; searchInputRef: React.RefObject<HTMLInputElement>; submittedQuery: string;
   searchMode: SearchMode; setSearchMode: (mode: SearchMode) => void; searchResponse: JokeSearchResponse | null; allSearchResultIds: Set<string>;
-  isSearching: boolean; runSearch: (query?: string, mode?: SearchMode) => Promise<void>; activeTrigger: string; clusterFilters: string[];
+  isSearching: boolean; runSearch: (query?: string, mode?: SearchMode) => Promise<void>; activeTriggers: string[]; clusterFilters: string[];
   setClusterFilters: React.Dispatch<React.SetStateAction<string[]>>; sortMode: SortMode; setSortMode: (mode: SortMode) => void;
   onlyMine: boolean; setOnlyMine: (value: boolean) => void; showClusterMenu: boolean; setShowClusterMenu: (value: boolean | ((old: boolean) => boolean)) => void;
   sentinelRef: React.RefObject<HTMLDivElement>; serverHasMore: boolean; loadingMore: boolean; onLoadMore: () => Promise<void>;
@@ -610,15 +651,23 @@ function HomePage(props: {
   const {
     allJokes, filteredJokes, popularTriggers, visibleCount, setVisibleCount, selectedJoke, setSelectedJoke, hoveredJoke, setHoveredJoke,
     searchText, setSearchText, searchInputRef, submittedQuery, searchMode, setSearchMode, searchResponse, allSearchResultIds,
-    isSearching, runSearch, activeTrigger, clusterFilters, setClusterFilters, sortMode, setSortMode, onlyMine, setOnlyMine,
+    isSearching, runSearch, activeTriggers, clusterFilters, setClusterFilters, sortMode, setSortMode, onlyMine, setOnlyMine,
     showClusterMenu, setShowClusterMenu, sentinelRef, serverHasMore, loadingMore, onLoadMore,
     onLike, onFavorite, onTag, onProfile, onOpen, onShare, onVoice, onAdd, onClear,
   } = props;
-  const galaxyJokes = useMemo(() => allJokes.filter((joke) => !clusterFilters.length || clusterFilters.includes(joke.cluster.slug)), [allJokes, clusterFilters]);
+  const galaxyJokes = useMemo(() => allJokes.filter((joke) =>
+    (!clusterFilters.length || clusterFilters.includes(joke.cluster.slug)) && matchesSelectedTriggers(joke, activeTriggers),
+  ), [allJokes, clusterFilters, activeTriggers]);
   const displayJokes = filteredJokes.slice(0, visibleCount);
-  const keywordResults = searchResponse?.keyword_results ?? [];
-  const semanticResults = searchResponse?.semantic_results ?? [];
+  const keywordResults = (searchResponse?.keyword_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
+  const semanticResults = (searchResponse?.semantic_results ?? []).filter((joke) => matchesSelectedTriggers(joke, activeTriggers));
   const activeClusterNames = clusters.filter((cluster) => clusterFilters.includes(cluster.slug)).map((cluster) => cluster.name);
+
+  useEffect(() => {
+    const nextSelection = galaxyJokes[0] ?? null;
+    if (selectedJoke && galaxyJokes.some((joke) => joke.id === selectedJoke.id)) return;
+    if (selectedJoke?.id !== nextSelection?.id) setSelectedJoke(nextSelection);
+  }, [galaxyJokes, selectedJoke, setSelectedJoke]);
 
   useEffect(() => {
     if (visibleCount >= filteredJokes.length && serverHasMore && !loadingMore) void onLoadMore();
@@ -651,14 +700,17 @@ function HomePage(props: {
     {submittedQuery && <section className="search-results-section" aria-live="polite">
       <div className="results-heading"><div><span className="section-kicker">РЕЗУЛЬТАТЫ ПОИСКА</span><h2>Для запроса <span className="query-highlight">«{submittedQuery}»</span></h2></div><button className="clear-results" onClick={onClear}><X size={14} /> Очистить поиск</button></div>
       <div className="results-meta"><span className="result-mode-pill"><Sparkles size={12} />{MODE_LABELS[searchMode]}</span><span>{(keywordResults.length + semanticResults.length).toLocaleString('ru-RU')} совпадений</span><span className="result-live-dot" />{isSearching ? 'Ищем в галактике…' : 'Релевантность учтена'}</div>
-      {!keywordResults.length && !semanticResults.length && !isSearching && <div className="no-results-note"><Info size={15} />{allJokes.length ? 'Точных совпадений пока нет. Попробуйте изменить запрос.' : 'Коллекция пока пуста — добавьте первую шутку.'}</div>}
+      {!keywordResults.length && !semanticResults.length && !isSearching && <div className="no-results-note"><Info size={15} />{activeTriggers.length ? 'По выбранным тегам совпадений пока нет. Попробуйте снять часть фильтров или изменить запрос.' : allJokes.length ? 'Точных совпадений пока нет. Попробуйте изменить запрос.' : 'Коллекция пока пуста — добавьте первую шутку.'}</div>}
       {keywordResults.length > 0 && <div className="result-group"><div className="result-group-title"><span className="result-index">01</span><div><h3>Совпадения по словам</h3><p>Текст шутки и смысловые триггеры</p></div><span className="result-count">{keywordResults.length}</span></div><div className="result-card-grid">{keywordResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge">{Math.round((joke.relevance ?? 0.82) * 100)}% в тему</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {searchMode === 'hybrid' && <div className="semantic-divider"><span /><div><Compass size={14} /> Похожие по смыслу</div><span /></div>}
       {semanticResults.length > 0 && <div className="result-group semantic-group"><div className="result-group-title"><span className="result-index semantic-index">{searchMode === 'semantic' ? '01' : '02'}</span><div><h3>{searchMode === 'semantic' ? 'По смыслу и ситуации' : 'Похожие по смыслу'}</h3><p>Нашли даже без общих слов</p></div><span className="result-count">{semanticResults.length}</span></div><div className="result-card-grid">{semanticResults.slice(0, 4).map((joke) => <div key={joke.id} className="result-card-wrap"><div className="relevance-badge semantic-relevance">{Math.round((joke.relevance ?? 0.76) * 100)}% близко</div><JokeCard joke={joke} compact onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} /></div>)}</div></div>}
       {isSearching && <div className="search-loading"><LoaderCircle size={16} className="spin" /> Подбираем смысловые совпадения…</div>}
     </section>}
 
-    {popularTriggers.length > 0 && <div className="popular-row"><div className="popular-label"><Tags size={14} /><span>ПОПУЛЯРНОЕ</span></div><div className="popular-tags">{popularTriggers.map((tag, index) => <button key={tag} className={`popular-tag ${activeTrigger === tag ? 'popular-tag-active' : ''}`} onClick={() => onTag(tag)}><span className={`popular-dot pop-dot-${index % 4}`} />{tag}</button>)}</div><button className="all-tags-link" onClick={() => setShowClusterMenu((value) => !value)}>Фильтры <ChevronDown size={13} /></button></div>}
+    {popularTriggers.length > 0 && <div className="popular-row"><div className="popular-label"><Tags size={14} /><span>ПОПУЛЯРНОЕ</span></div><div className="popular-tags">{popularTriggers.map((tag, index) => {
+      const selected = activeTriggers.some((trigger) => normalizeTrigger(trigger) === normalizeTrigger(tag));
+      return <button key={tag} aria-pressed={selected} className={`popular-tag ${selected ? 'popular-tag-active' : ''}`} onClick={() => onTag(tag)}><span className={`popular-dot pop-dot-${index % 4}`} />{tag}</button>;
+    })}</div><button className="all-tags-link" onClick={() => setShowClusterMenu((value) => !value)}>Фильтры <ChevronDown size={13} /></button></div>}
 
     <div className="filter-panel">
       <div className="filter-left">
@@ -667,7 +719,7 @@ function HomePage(props: {
           {showClusterMenu && <div className="cluster-dropdown"><div className="dropdown-title"><b>Выберите темы</b><button onClick={() => setShowClusterMenu(false)} aria-label="Закрыть"><X size={14} /></button></div>{clusters.map((cluster) => <button key={cluster.slug} className="cluster-option" onClick={() => setClusterFilters((current) => current.includes(cluster.slug) ? current.filter((slug) => slug !== cluster.slug) : [...current, cluster.slug])}><span className="cluster-dot" style={{ background: cluster.color }} /><span>{cluster.name}</span>{clusterFilters.includes(cluster.slug) && <Check size={14} />}</button>)}<button className="dropdown-reset" onClick={() => setClusterFilters([])}>Сбросить выбор</button></div>}
         </div>
         <button className={`filter-button ${onlyMine ? 'filter-button-on' : ''}`} onClick={() => setOnlyMine(!onlyMine)}><UserRound size={15} />Только мои</button>
-        {activeTrigger && <button className="active-filter-chip" onClick={() => onTag(activeTrigger)}>#{activeTrigger}<X size={13} /></button>}
+        {activeTriggers.map((trigger) => <button key={normalizeTrigger(trigger)} className="active-filter-chip" onClick={() => onTag(trigger)}>#{trigger}<X size={13} /></button>)}
         {activeClusterNames.map((name) => <button key={name} className="active-filter-chip" onClick={() => setClusterFilters((current) => current.filter((slug) => !clusters.find((cluster) => cluster.slug === slug && cluster.name === name)))}>{name}<X size={13} /></button>)}
       </div>
       <label className="sort-select"><span>Сортировка</span><select value={sortMode} onChange={(event) => setSortMode(event.target.value as SortMode)} aria-label="Сортировка шуток">{Object.entries(SORT_LABELS).map(([key, label]) => <option key={key} value={key}>{label}</option>)}</select><ChevronDown size={13} /></label>
@@ -707,7 +759,7 @@ function HomePage(props: {
     </section>
 
     <section className="feed-section">
-      <div className="feed-heading"><div><span className="section-kicker">ИЗ ВСЕХ ОРБИТ</span><h2>{activeTrigger ? `Шутки по тегу «${activeTrigger}»` : clusterFilters.length ? 'Выбранные темы' : 'Свежие шутки'} <span className="feed-count">{filteredJokes.length}</span></h2></div><button className="button button-ghost" onClick={onAdd}><Plus size={15} />Поделиться своей</button></div>
+      <div className="feed-heading"><div><span className="section-kicker">ИЗ ВСЕХ ОРБИТ</span><h2>{activeTriggers.length === 1 ? `Шутки по тегу «${activeTriggers[0]}»` : activeTriggers.length > 1 ? `Шутки по тегам «${activeTriggers.join('», «')}»` : clusterFilters.length ? 'Выбранные темы' : 'Свежие шутки'} <span className="feed-count">{filteredJokes.length}</span></h2></div><button className="button button-ghost" onClick={onAdd}><Plus size={15} />Поделиться своей</button></div>
       {!displayJokes.length ? allJokes.length === 0 ? <EmptyState title="Галактика ждёт первой шутки" text="Пока здесь нет пользовательских публикаций. Добавьте первую, чтобы начать собирать коллекцию." button="Добавить первую шутку" onClick={onAdd} /> : <EmptyState title="На этой орбите пока тихо" text="Снимите часть фильтров или добавьте первую шутку в тему." button="Сбросить фильтры" onClick={onClear} /> : <div className="feed-grid">{displayJokes.map((joke) => <JokeCard key={joke.id} joke={joke} onLike={onLike} onFavorite={onFavorite} onTag={onTag} onProfile={onProfile} onOpen={onOpen} onShare={onShare} />)}</div>}
       {visibleCount < filteredJokes.length && <div ref={sentinelRef} className="feed-sentinel"><span className="loading-orbit" /><span>Подтягиваем шутки из другой орбиты…</span><button onClick={() => setVisibleCount((count) => Math.min(count + 8, filteredJokes.length))}>Показать ещё</button></div>}
       {visibleCount >= filteredJokes.length && serverHasMore && <div ref={sentinelRef} className="feed-sentinel"><span className="loading-orbit" /><span>{loadingMore ? 'Загружаем следующую партию…' : 'Здесь есть ещё шутки, подгружаем.'}</span><button onClick={() => void onLoadMore()}>Загрузить ещё</button></div>}
